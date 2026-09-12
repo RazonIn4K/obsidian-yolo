@@ -1,4 +1,7 @@
-import type { AssistantToolPreference } from '../../types/assistant.types'
+import type {
+  AssistantToolPreference,
+  AssistantToolServerPreference,
+} from '../../types/assistant.types'
 import type {
   ChatConversationCompactionLike,
   ChatMessage,
@@ -9,11 +12,10 @@ import type { ContextualInjection } from '../../utils/chat/contextual-injections
 import { RequestContextBuilder } from '../../utils/chat/requestContextBuilder'
 import { estimateJsonTokens } from '../../utils/llm/contextTokenEstimate'
 import { McpManager } from '../mcp/mcpManager'
+import type { ChatModeCapabilityOverrides } from '../tools/types'
 
-import {
-  type ToolCapabilityMode,
-  buildToolCapabilityPrompt,
-} from './tool-capability-prompt'
+import type { ChatContextPolicy } from './chat-runtime-profiles'
+import { type RuntimeMode, buildRuntimeModePrompt } from './runtime-mode-prompt'
 import { selectAllowedTools } from './tool-selection'
 
 export const estimateContinuationRequestContextTokens = async ({
@@ -27,10 +29,16 @@ export const estimateContinuationRequestContextTokens = async ({
   includeBuiltinTools,
   apiType,
   allowedToolNames,
-  enableToolDisclosure,
   toolPreferences,
+  toolServerPreferences,
   contextualInjections,
-  toolCapabilityMode,
+  capabilityOverrides,
+  runtimeMode,
+  modeEnvironmentPrompt,
+  modePersonaPrompt,
+  modePersonaModuleId,
+  moduleChatModeId,
+  contextPolicy,
 }: {
   requestContextBuilder: RequestContextBuilder
   mcpManager: McpManager
@@ -42,48 +50,55 @@ export const estimateContinuationRequestContextTokens = async ({
   includeBuiltinTools: boolean
   apiType?: LLMProviderApiType | null
   allowedToolNames?: string[]
-  enableToolDisclosure?: boolean
   toolPreferences?: Record<string, AssistantToolPreference>
+  toolServerPreferences?: Record<string, AssistantToolServerPreference>
   contextualInjections?: ContextualInjection[]
-  toolCapabilityMode?: ToolCapabilityMode
+  /** The running chat mode's capability grant; see `AgentToolGateway`. */
+  capabilityOverrides?: ChatModeCapabilityOverrides
+  runtimeMode?: RuntimeMode
+  modeEnvironmentPrompt?: string
+  modePersonaPrompt?: string
+  modePersonaModuleId?: string
+  moduleChatModeId?: string
+  contextPolicy?: ChatContextPolicy
 }): Promise<number> => {
   const availableTools = enableTools
     ? await mcpManager.listAvailableTools({
         includeBuiltinTools,
+        capabilityOverrides,
         // Tailor built-in tool schemas to the active model so the token
         // estimate reflects what the model will actually see at request time.
         chatModelModalities: model.modalities,
       })
     : []
-  const {
-    filteredTools,
-    hasTools,
-    hasMemoryTools,
-    hasOnDemandTools,
-    requestTools,
-  } = await selectAllowedTools({
-    availableTools,
-    allowedToolNames,
-    toolPreferences,
-    apiType,
-    enableToolDisclosure,
-    jsSandboxSettings: mcpManager.getJsSandboxSettings(),
-  })
+  const { hasTools, hasOnDemandTools, requestTools, deferredToolCatalog } =
+    await selectAllowedTools({
+      availableTools,
+      allowedToolNames,
+      toolPreferences,
+      toolServerPreferences,
+      model,
+      apiType,
+      jsSandboxSettings: mcpManager.getJsSandboxSettings(),
+      settings: mcpManager.getSettingsSnapshot(),
+    })
 
-  const runtimeModePrompt = buildToolCapabilityPrompt({
-    mode: toolCapabilityMode ?? 'agent',
-    toolNames: filteredTools.map((tool) => tool.name),
-  })
+  const runtimeModePrompt = buildRuntimeModePrompt(runtimeMode ?? 'agent')
   const requestMessages = await requestContextBuilder.generateRequestMessages({
     messages,
     hasTools,
-    hasMemoryTools,
     hasOnDemandTools,
+    deferredToolCatalogText: deferredToolCatalog?.text,
     model,
     conversationId,
     compaction,
     contextualInjections,
     runtimeModePrompt,
+    modeEnvironmentPrompt,
+    modePersonaPrompt,
+    modePersonaModuleId,
+    moduleChatModeId,
+    contextPolicy,
     // Token estimate only: never create/freeze the snapshot ahead of the real request.
     systemPromptSnapshotMode: 'reuse',
   })

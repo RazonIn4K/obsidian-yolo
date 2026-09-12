@@ -1,7 +1,7 @@
 import {
   Check,
   ChevronDown,
-  ChevronUp,
+  ChevronLeft,
   CircleMinus,
   Edit,
   Loader2,
@@ -16,7 +16,7 @@ import { useSettings } from '../../../contexts/settings-context'
 import { pruneOrphanedAssistantToolPreferences } from '../../../core/agent/tool-preferences'
 import { getLocalFileToolServerName } from '../../../core/mcp/localFileTools'
 import { McpManager } from '../../../core/mcp/mcpManager'
-import YoloPlugin from '../../../main'
+import type YoloPlugin from '../../../main'
 import {
   McpServerState,
   McpServerStatus,
@@ -171,6 +171,9 @@ function McpServerComponent({
           },
           assistants: nextAssistants,
         })
+        if (server.config.auth === 'oauth') {
+          await (await plugin.getMcpManager()).clearOAuthCredential(server.name)
+        }
       } catch (error: unknown) {
         console.error('Failed to delete MCP server', error)
         new Notice(
@@ -242,7 +245,7 @@ function McpServerComponent({
               isOpen ? t('settings.mcp.collapse') : t('settings.mcp.expand')
             }
           >
-            {isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+            {isOpen ? <ChevronDown size={16} /> : <ChevronLeft size={16} />}
           </button>
         </div>
       </div>

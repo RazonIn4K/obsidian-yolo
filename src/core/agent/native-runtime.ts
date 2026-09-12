@@ -9,6 +9,7 @@ import {
   normalizeChatConversationCompactionState,
 } from '../../types/chat'
 import type { RequestMessage, RequestTool } from '../../types/llm/request'
+import type { ProviderExecutedToolCall } from '../../types/llm/response'
 import type { ReasoningLevel } from '../../types/reasoning'
 import {
   ToolCallRequest,
@@ -29,6 +30,7 @@ import {
 } from './compaction'
 import { AgentLlmTurnExecutor } from './llm-turn-executor'
 import { createAgentLoopWorker } from './loop-worker'
+import { buildProviderToolRunMessage } from './provider-tool-run'
 import {
   applyRepeatedReadCallGuard,
   createRepeatedReadCallGuardState,
@@ -144,13 +146,12 @@ export class NativeAgentRuntime implements AgentRuntime {
     const toolGateway = new AgentToolGateway(input.mcpManager, {
       toolsEnabled: this.loopConfig.enableTools,
       allowedToolNames: input.allowedToolNames,
-      enableToolDisclosure: input.enableToolDisclosure,
       toolPreferences: input.toolPreferences,
+      builtinCapabilityPreferences: input.builtinCapabilityPreferences,
       toolServerPreferences: input.toolServerPreferences,
       workspaceScope: input.workspaceScope,
       allowedSkillPaths: input.allowedSkillPaths,
       apiType: input.apiType,
-      runContext: input.runContext,
       subagentParentContext: input.systemPromptOverride
         ? undefined
         : buildSubagentParentContext(input, this.loopConfig),
@@ -158,6 +159,10 @@ export class NativeAgentRuntime implements AgentRuntime {
       toolApprovalConversationId: input.toolApprovalConversationId,
       blockedCommandPrefixes: input.blockedCommandPrefixes,
       bypassToolApproval: input.bypassToolApproval,
+      bashReadOnly: input.bashReadOnly,
+      moduleToolApprovalPolicies: input.moduleToolApprovalPolicies,
+      capabilityOverrides: input.capabilityOverrides,
+      vaultPathBoundary: input.vaultPathBoundary,
     })
     const worker = createAgentLoopWorker()
     const runId = uuidv4()
@@ -237,8 +242,8 @@ export class NativeAgentRuntime implements AgentRuntime {
                   includeBuiltinTools: this.loopConfig.includeBuiltinTools,
                   apiType: input.apiType,
                   allowedToolNames: input.allowedToolNames,
-                  enableToolDisclosure: input.enableToolDisclosure,
                   toolPreferences: input.toolPreferences,
+                  toolServerPreferences: input.toolServerPreferences,
                   allowedSkillPaths: input.allowedSkillPaths,
                   abortSignal,
                   reasoningLevel: input.reasoningLevel,
@@ -247,7 +252,13 @@ export class NativeAgentRuntime implements AgentRuntime {
                     baseInjections: input.contextualInjections,
                     messages: conversationMessages,
                   }),
-                  toolCapabilityMode: input.toolCapabilityMode,
+                  capabilityOverrides: input.capabilityOverrides,
+                  runtimeMode: input.runtimeMode,
+                  modeEnvironmentPrompt: input.modeEnvironmentPrompt,
+                  modePersonaPrompt: input.modePersonaPrompt,
+                  modePersonaModuleId: input.modePersonaModuleId,
+                  moduleChatModeId: input.moduleChatModeId,
+                  contextPolicy: input.contextPolicy,
                   transientRequestMessages: autoContextCompactionNotice
                     ? [
                         autoContextCompactionNotice,
@@ -270,10 +281,25 @@ export class NativeAgentRuntime implements AgentRuntime {
                       : undefined,
                   resumeAssistantMessage: resumedMessageForTurn,
                   geminiTools: input.geminiTools,
+                  ...(input.session ? { session: input.session } : {}),
+                  ...(input.nativeToolPolicy
+                    ? { nativeToolPolicy: input.nativeToolPolicy }
+                    : {}),
+                  ...(input.session ? { session: input.session } : {}),
+                  ...(input.nativeToolPolicy
+                    ? { nativeToolPolicy: input.nativeToolPolicy }
+                    : {}),
                   systemPromptOverride: input.systemPromptOverride,
                   onAssistantMessage: (assistantMessage) => {
                     this.upsertAssistantMessage(assistantMessage)
                     this.notifySubscribers()
+                  },
+                  onProviderToolRun: (calls) => {
+                    this.upsertProviderToolRun({
+                      calls,
+                      input,
+                      sourceUserMessageId: currentSourceUserMessageId,
+                    })
                   },
                 })
 
@@ -405,48 +431,66 @@ export class NativeAgentRuntime implements AgentRuntime {
                         summaryModelId: input.model.id,
                       })
                     if (nextCompaction) {
-                      try {
-                        nextCompaction.estimatedNextContextTokens =
-                          await estimateContinuationRequestContextTokens({
-                            requestContextBuilder: input.requestContextBuilder,
-                            mcpManager: input.mcpManager,
-                            model: input.model,
-                            messages: conversationMessages,
-                            conversationId: input.conversationId,
-                            compaction: nextCompaction,
-                            enableTools: this.loopConfig.enableTools,
-                            includeBuiltinTools:
-                              this.loopConfig.includeBuiltinTools,
-                            apiType: input.apiType,
-                            allowedToolNames: input.allowedToolNames,
-                            enableToolDisclosure: input.enableToolDisclosure,
-                            toolPreferences: input.toolPreferences,
-                            contextualInjections: composeAgentInjections({
-                              baseInjections: input.contextualInjections,
-                              messages: conversationMessages,
-                            }),
-                            toolCapabilityMode: input.toolCapabilityMode,
-                          })
-                      } catch (error) {
-                        console.warn(
-                          '[YOLO][Compact] failed to estimate continuation context tokens',
-                          error,
-                        )
-                      }
                       const preCompactionTokens =
                         getLastAssistantPromptTokens(conversationMessages)
-                      if (
-                        typeof preCompactionTokens === 'number' &&
-                        typeof nextCompaction.estimatedNextContextTokens ===
-                          'number'
-                      ) {
-                        const saved =
-                          preCompactionTokens -
-                          nextCompaction.estimatedNextContextTokens
-                        if (saved > 0) {
-                          nextCompaction.estimatedTokensSaved = saved
-                        }
-                      }
+                      // These token counts are presentation-only. Publish the
+                      // usable compaction state immediately and estimate in the
+                      // background so the next Agent LLM turn is not held behind
+                      // a second full context/tokenizer pass.
+                      void estimateContinuationRequestContextTokens({
+                        requestContextBuilder: input.requestContextBuilder,
+                        mcpManager: input.mcpManager,
+                        model: input.model,
+                        messages: conversationMessages,
+                        conversationId: input.conversationId,
+                        compaction: nextCompaction,
+                        enableTools: this.loopConfig.enableTools,
+                        includeBuiltinTools:
+                          this.loopConfig.includeBuiltinTools,
+                        apiType: input.apiType,
+                        allowedToolNames: input.allowedToolNames,
+                        toolPreferences: input.toolPreferences,
+                        toolServerPreferences: input.toolServerPreferences,
+                        contextualInjections: composeAgentInjections({
+                          baseInjections: input.contextualInjections,
+                          messages: conversationMessages,
+                        }),
+                        capabilityOverrides: input.capabilityOverrides,
+                        runtimeMode: input.runtimeMode,
+                        modeEnvironmentPrompt: input.modeEnvironmentPrompt,
+                        modePersonaPrompt: input.modePersonaPrompt,
+                        modePersonaModuleId: input.modePersonaModuleId,
+                        moduleChatModeId: input.moduleChatModeId,
+                        contextPolicy: input.contextPolicy,
+                      })
+                        .then((estimatedNextContextTokens) => {
+                          const saved =
+                            typeof preCompactionTokens === 'number'
+                              ? preCompactionTokens - estimatedNextContextTokens
+                              : undefined
+                          // Published compaction entries are immutable once
+                          // notified; replace by reference instead of
+                          // mutating the entry already handed to subscribers.
+                          this.compactionState = this.compactionState.map(
+                            (entry) =>
+                              entry === nextCompaction
+                                ? {
+                                    ...entry,
+                                    estimatedNextContextTokens,
+                                    ...(saved !== undefined && saved > 0
+                                      ? { estimatedTokensSaved: saved }
+                                      : {}),
+                                  }
+                                : entry,
+                          )
+                          this.notifySubscribers()
+                        })
+                        .catch((error) => {
+                          console.warn(
+                            '[YOLO][Compact] failed to estimate continuation context tokens',
+                            error,
+                          )
+                        })
                     }
                     this.compactionState = nextCompaction
                       ? [...this.compactionState, nextCompaction]
@@ -599,12 +643,18 @@ export class NativeAgentRuntime implements AgentRuntime {
       apiType: input.apiType,
       allowedToolNames: input.allowedToolNames,
       toolPreferences: input.toolPreferences,
+      toolServerPreferences: input.toolServerPreferences,
       allowedSkillPaths: input.allowedSkillPaths,
       abortSignal,
       reasoningLevel: input.reasoningLevel,
       requestParams: input.requestParams,
       contextualInjections: input.contextualInjections,
-      toolCapabilityMode: input.toolCapabilityMode,
+      runtimeMode: input.runtimeMode,
+      modeEnvironmentPrompt: input.modeEnvironmentPrompt,
+      modePersonaPrompt: input.modePersonaPrompt,
+      modePersonaModuleId: input.modePersonaModuleId,
+      moduleChatModeId: input.moduleChatModeId,
+      contextPolicy: input.contextPolicy,
       geminiTools: input.geminiTools,
       systemPromptOverride: input.systemPromptOverride,
       transientRequestMessages: resumeAssistantMessage
@@ -620,6 +670,13 @@ export class NativeAgentRuntime implements AgentRuntime {
         this.upsertAssistantMessage(assistantMessage)
         this.notifySubscribers()
       },
+      onProviderToolRun: (calls) => {
+        this.upsertProviderToolRun({
+          calls,
+          input,
+          sourceUserMessageId: input.sourceUserMessageId,
+        })
+      },
     })
 
     await llmTurnExecutor.run()
@@ -630,6 +687,38 @@ export class NativeAgentRuntime implements AgentRuntime {
     this.subscribers.forEach((callback) => {
       callback(snapshot)
     })
+  }
+
+  /**
+   * Place, or update, a run of tools the provider executed itself. The
+   * executor has already sealed the assistant message before it and opened the
+   * one after, so this only has to land between them — which appending does,
+   * because the message that follows has not been created yet.
+   */
+  private upsertProviderToolRun({
+    calls,
+    input,
+    sourceUserMessageId,
+  }: {
+    calls: ProviderExecutedToolCall[]
+    input: AgentRuntimeRunInput
+    sourceUserMessageId?: string
+  }): void {
+    this.replaceToolMessage(
+      buildProviderToolRunMessage({
+        calls,
+        conversationId: input.conversationId,
+        branchId: input.branchId,
+        sourceUserMessageId,
+        branchModelId: input.model.id,
+        branchLabel:
+          input.branchLabel ??
+          input.model.name ??
+          input.model.model ??
+          input.model.id,
+      }),
+    )
+    this.notifySubscribers()
   }
 
   private upsertAssistantMessage(message: ChatAssistantMessage): void {

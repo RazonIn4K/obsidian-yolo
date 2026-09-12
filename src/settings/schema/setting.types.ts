@@ -4,7 +4,9 @@ import {
   DEFAULT_CHAT_MODELS,
   DEFAULT_CHAT_TITLE_MODEL_ID,
 } from '../../constants'
+import { CLI_RUNTIME_IDS } from '../../core/cli-runtime/types'
 import { DEFAULT_LOCAL_MCP_SERVER_PORT } from '../../core/mcp/localMcpServerConfig'
+import { DEFAULT_LOCAL_EMBEDDING_ENDPOINT } from '../../core/rag/local-embedding/constants'
 import { webSearchSettingsSchema } from '../../core/web-search/types'
 import { assistantSchema } from '../../types/assistant.types'
 import { chatModelSchema } from '../../types/chat-model.types'
@@ -17,7 +19,7 @@ import { llmProviderSchema } from '../../types/provider.types'
 import { REASONING_LEVELS, ReasoningLevel } from '../../types/reasoning'
 import { DEFAULT_CHAT_QUICK_ACCESS_ENTRIES } from '../chatQuickAccess'
 
-import { SETTINGS_SCHEMA_VERSION } from './migrations'
+import { SETTINGS_SCHEMA_VERSION } from './migrations/version'
 
 const resilientArraySchema = <T extends z.ZodTypeAny>(itemSchema: T) =>
   z
@@ -42,15 +44,6 @@ const ragOptionsSchema = z.object({
    * or per-minute-quota free tiers). Clamped to [1, 24] at the call site.
    */
   embeddingConcurrency: z.number().catch(10),
-  excludePatterns: z.array(z.string()).catch([]),
-  /**
-   * When true, the plugin's YOLO base directory (resolved dynamically from
-   * `yolo.baseDir`) is excluded from indexing on top of `excludePatterns`.
-   * The UI surfaces this as a removable chip in the exclude folder list;
-   * deleting that chip flips this flag to false and persists the choice.
-   */
-  excludeYoloBaseDir: z.boolean().catch(true),
-  includePatterns: z.array(z.string()).catch([]),
   /** When true, index `.pdf` files for RAG (text extraction). */
   indexPdf: z.boolean().catch(true),
   // auto update options
@@ -59,7 +52,95 @@ const ragOptionsSchema = z.object({
   lastAutoUpdateAt: z.number().catch(0),
 })
 
+/**
+ * One independently-indexed knowledge base: its own vector store
+ * (`yolo-vector:<vaultNs>:<kbId>`), scoped to `include`/`exclude` (same
+ * semantics as `scopeRules.ts`: any exclude wins; empty `include` = whole
+ * vault; otherwise a path must match an include rule). All knowledge bases
+ * share the single global `embeddingModelId` and the maintenance knobs left
+ * on `ragOptions` (chunkSize, minSimilarity, limit, embeddingConcurrency,
+ * indexPdf, autoUpdate*). `name` is the model-facing selector for
+ * `vault_search`'s `knowledgeBase` argument (matched case-insensitively,
+ * trimmed) — keep it unique. `description` is optional, model-facing
+ * context for picking the right base; never shown to the user as anything
+ * but their own words.
+ */
+export const knowledgeBaseSchema = z.object({
+  id: z.string(),
+  name: z.string().catch(''),
+  description: z.string().catch(''),
+  include: z.array(z.string()).catch([]),
+  exclude: z.array(z.string()).catch([]),
+})
+export type KnowledgeBase = z.infer<typeof knowledgeBaseSchema>
+
+const localEmbeddingSettingsSchema = z.object({
+  endpoint: z.string().catch(DEFAULT_LOCAL_EMBEDDING_ENDPOINT),
+})
+export type LocalEmbeddingSettings = z.infer<
+  typeof localEmbeddingSettingsSchema
+>
+
+/**
+ * `knowledgeBases` validation runs in two stages:
+ * 1. `resilientArraySchema` drops any item that fails `knowledgeBaseSchema`
+ *    outright (missing `id`, wrong types, ...) — same as every other
+ *    settings array, so one corrupted entry never blocks the rest.
+ * 2. This `.superRefine` then validates the survivors as a set: `name` must
+ *    be non-empty after trimming, and both `id` and the trimmed,
+ *    case-insensitive `name` must be unique — `name` is the model-facing
+ *    selector `vault_search`'s `knowledgeBase` argument matches against (see
+ *    `knowledgeBaseSchema`'s doc comment), so two bases sharing one make
+ *    that argument ambiguous.
+ *
+ * Unlike stage 1, a violation here fails the whole `knowledgeBases` field
+ * instead of silently dropping the offending entry. That is deliberate: it
+ * is what lets `import-config.ts`'s `safeParse` (and `main.ts`'s
+ * `setSettings`) surface a clear "duplicate knowledge base" error instead of
+ * silently discarding one of the two. On the disk-load path
+ * (`parseYoloSettings`), a failure here falls back to full schema defaults
+ * like any other unparseable settings field — pre-existing, systemic
+ * behavior, not specific to this field.
+ */
+const knowledgeBasesFieldSchema = resilientArraySchema(knowledgeBaseSchema)
+  .transform((items) =>
+    items.map((item) => ({ ...item, name: item.name.trim() })),
+  )
+  .superRefine((items, ctx) => {
+    const seenIds = new Set<string>()
+    const seenNames = new Set<string>()
+    items.forEach((item, index) => {
+      if (item.name.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Knowledge base at index ${index} has an empty name`,
+          path: [index, 'name'],
+        })
+        return
+      }
+      if (seenIds.has(item.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate knowledge base id "${item.id}"`,
+          path: [index, 'id'],
+        })
+      }
+      seenIds.add(item.id)
+
+      const nameKey = item.name.toLowerCase()
+      if (seenNames.has(nameKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate knowledge base name "${item.name}"`,
+          path: [index, 'name'],
+        })
+      }
+      seenNames.add(nameKey)
+    })
+  })
+
 type TabCompletionOptionDefaults = {
+  multipleCandidatesEnabled: boolean
   idleTriggerEnabled: boolean
   autoTriggerDelayMs: number
   autoTriggerCooldownMs: number
@@ -85,6 +166,7 @@ export type TabCompletionTrigger = {
   type: 'string' | 'regex'
   pattern: string
   enabled: boolean
+  acceptMode: 'insert' | 'replace'
   description?: string
 }
 
@@ -106,14 +188,15 @@ export const notificationTimingSchema = z.enum(['always', 'when-unfocused'])
 export type NotificationTiming = z.infer<typeof notificationTimingSchema>
 
 export const DEFAULT_TAB_COMPLETION_OPTIONS: TabCompletionOptionDefaults = {
+  multipleCandidatesEnabled: true,
   idleTriggerEnabled: false,
   autoTriggerDelayMs: 3000,
   autoTriggerCooldownMs: 15000,
   triggerDelayMs: 3000,
-  minContextLength: 20,
+  minContextLength: 5,
   contextRange: 4000, // Total context chars, split 4:1 (3200 before, 800 after)
-  maxSuggestionLength: 2000,
-  temperature: 0.5,
+  maxSuggestionLength: 2000, // Legacy; no longer applied at request/render time
+  temperature: 0.5, // Legacy; tab completion no longer sends temperature
   requestTimeoutMs: 12000,
   // Tab 补全是延迟敏感场景，默认关闭推理；用户可在设置中改为 low / auto 以适配强制推理的模型（如 gpt-oss）
   reasoningLevel: 'off',
@@ -144,36 +227,42 @@ export const DEFAULT_TAB_COMPLETION_TRIGGERS: TabCompletionTrigger[] = [
     type: 'string',
     pattern: ', ',
     enabled: true,
+    acceptMode: 'insert',
   },
   {
     id: 'sentence-end-chinese-comma',
     type: 'string',
     pattern: '，',
     enabled: true,
+    acceptMode: 'insert',
   },
   {
     id: 'sentence-end-colon',
     type: 'string',
     pattern: ': ',
     enabled: true,
+    acceptMode: 'insert',
   },
   {
     id: 'sentence-end-chinese-colon',
     type: 'string',
     pattern: '：',
     enabled: true,
+    acceptMode: 'insert',
   },
   {
     id: 'newline',
     type: 'regex',
     pattern: '\\n$',
     enabled: true,
+    acceptMode: 'insert',
   },
   {
     id: 'list-item',
     type: 'regex',
     pattern: '(?:^|\\n)[-*+]\\s$',
     enabled: true,
+    acceptMode: 'insert',
   },
 ]
 
@@ -193,6 +282,9 @@ export const splitContextRange = (
 
 const tabCompletionOptionsSchema = z
   .object({
+    multipleCandidatesEnabled: z
+      .boolean()
+      .catch(DEFAULT_TAB_COMPLETION_OPTIONS.multipleCandidatesEnabled),
     idleTriggerEnabled: z
       .boolean()
       .catch(DEFAULT_TAB_COMPLETION_OPTIONS.idleTriggerEnabled),
@@ -284,6 +376,7 @@ const tabCompletionTriggerSchema = z
     type: z.enum(['string', 'regex']),
     pattern: z.string(),
     enabled: z.boolean().catch(true),
+    acceptMode: z.enum(['insert', 'replace']).catch('insert'),
     description: z.string().optional(),
   })
   .catch({
@@ -291,6 +384,7 @@ const tabCompletionTriggerSchema = z
     type: 'string',
     pattern: '',
     enabled: true,
+    acceptMode: 'insert',
   })
 
 /**
@@ -324,6 +418,16 @@ export const yoloSettingsSchema = z.object({
   // 更新提示:同版本第二次关闭后记录被静音的版本号,只有出现更高版本才会再次提示。
   mutedUpdateVersion: z.string().catch(''),
 
+  // 模块更新提示:按模块记录被静音的版本,更高版本仍会重新提示。
+  mutedModuleUpdateVersions: z.record(z.string(), z.string()).catch({}),
+
+  /**
+   * 检测到新版本时是否弹出更新卡片。关闭后主插件与模块都不再提示,也不再自动
+   * 下载(没有卡片就没有安装入口)。分发源 Feed 仍然照常请求——它同时是模块
+   * 目录的数据源,`设置 → 模块` 的更新按钮依赖它。
+   */
+  pluginUpdateNoticeEnabled: z.boolean().catch(true),
+
   /** 检测到新版本时在后台自动下载 release 文件；安装仍需用户确认。 */
   pluginUpdateAutoDownloadEnabled: z.boolean().catch(true),
 
@@ -335,21 +439,73 @@ export const yoloSettingsSchema = z.object({
     minSimilarity: 0.0,
     limit: 10,
     embeddingConcurrency: 10,
-    excludePatterns: [],
-    excludeYoloBaseDir: true,
-    includePatterns: [],
     indexPdf: true,
     autoUpdateEnabled: true,
     autoUpdateIntervalHours: 0,
     lastAutoUpdateAt: 0,
   }),
 
+  /**
+   * Independently-indexed knowledge bases. Never auto-populated by
+   * migration — upgrading users start at `[]` and create their own (the
+   * IndexedDB-backed vector store already requires a from-scratch rebuild).
+   */
+  knowledgeBases: knowledgeBasesFieldSchema,
+
+  /**
+   * Local (on-device) embedding model download settings — see
+   * docs/plans/08-22-local-embedding/00-plan.md §3.4. `endpoint` is the
+   * Hugging Face Hub-compatible host model files are resolved against
+   * (`${endpoint}/${hfRepo}/resolve/${revision}/${file}`); a purely additive
+   * field with a schema default, so it needs no migration entry of its own.
+   */
+  localEmbedding: localEmbeddingSettingsSchema.catch({
+    endpoint: DEFAULT_LOCAL_EMBEDDING_ENDPOINT,
+  }),
+
   // MCP configuration
   mcp: z
     .object({
       servers: resilientArraySchema(mcpServerConfigSchema),
-      builtinToolOptions: mcpServerToolOptionsSchema.catch({}),
-      enableToolDisclosure: z.boolean().catch(false),
+      /**
+       * Keyed by `BuiltinCapabilityId` as of the `80_to_81` settings
+       * migration (D9, docs/plans/2026-08-15-tool-registry/phase2-migration.md
+       * D9) — was `builtinToolOptions`, keyed by the pre-capability short
+       * tool/group names. Reuses `mcpServerToolOptionsSchema` unchanged: this
+       * map carries more than `disabled` — `delegate_subagent`'s
+       * `allowedModelIds`/`preferredModelId` and `terminal_command`'s
+       * `blockedPrefixes` live here too, now under `subagent_delegation` /
+       * `terminal` respectively.
+       */
+      builtinCapabilityOptions: mcpServerToolOptionsSchema.catch({}),
+      /**
+       * Derived cache, not user configuration: the last-known `serverInfo`
+       * and tool-name list for each configured MCP server, keyed by the
+       * server's local id. Written by `McpManager` on a successful connect,
+       * and only when the discovered value actually changed.
+       *
+       * It lives in settings because the model-facing tool catalog is built
+       * during system-prompt assembly, which already reads settings, and
+       * because `computeSystemPromptFingerprint` can then treat it like any
+       * other configuration-level input. Losing it is harmless — the affected
+       * server is simply absent from the catalog until it connects once.
+       */
+      discoveredCatalogs: z
+        .record(
+          z.string(),
+          z.object({
+            serverInfo: z
+              .object({
+                name: z.string(),
+                title: z.string().optional(),
+                description: z.string().optional(),
+                version: z.string().optional(),
+              })
+              .optional(),
+            toolNames: z.array(z.string()).catch([]),
+          }),
+        )
+        .catch({}),
       localServer: z
         .object({
           enabled: z.boolean().catch(false),
@@ -369,8 +525,8 @@ export const yoloSettingsSchema = z.object({
     })
     .catch({
       servers: [],
-      builtinToolOptions: {},
-      enableToolDisclosure: false,
+      builtinCapabilityOptions: {},
+      discoveredCatalogs: {},
       localServer: {
         enabled: false,
         port: DEFAULT_LOCAL_MCP_SERVER_PORT,
@@ -428,14 +584,17 @@ export const yoloSettingsSchema = z.object({
       includeCurrentFileContent: z.boolean(),
       mentionDisplayMode: z.enum(['inline', 'badge']).optional(),
       mentionContextMode: z.enum(['light', 'full']).optional(),
+      enterKeyCreatesNewline: z.boolean().optional(),
       chatInputHeight: z.number().int().min(80).max(520).optional(),
       chatApplyMode: z.enum(['review-required', 'direct-apply']).optional(),
       chatTitlePrompt: z.string().optional(),
-      // Chat mode (ask/agent)
-      chatMode: z.enum(['ask', 'agent']).optional(),
-      // Auto-approve tool calls (YOLO). Orthogonal to chatMode; only effective
-      // in Agent mode.
+      // Chat mode (ask/agent/max)
+      chatMode: z.enum(['ask', 'agent', 'max']).optional(),
+      // Auto-approve tool calls (YOLO). Orthogonal to chatMode, and stored per
+      // trust profile: Agent and Max each keep their own. Ask has no profile
+      // of its own and reads Agent's. See `yoloPreferenceKeyForMode`.
       agentYoloEnabled: z.boolean().optional(),
+      maxYoloEnabled: z.boolean().optional(),
       // Whether the user has acknowledged the first-time full access (YOLO) warning
       fullAccessWarningConfirmed: z.boolean().optional(),
       // Persist preferred reasoning level per model id in Chat input
@@ -471,6 +630,22 @@ export const yoloSettingsSchema = z.object({
       lastChatPlacement: z
         .enum(['sidebar', 'tab', 'split', 'window'])
         .optional(),
+      // Last user-selected conversation surface and CLI provider. Kept
+      // separately so returning to Chat does not forget the preferred CLI.
+      lastChatSurface: z.enum(['chat', 'cli']).optional(),
+      lastCliRuntimeId: z.enum(CLI_RUNTIME_IDS).optional(),
+      cliModelIdByRuntime: z
+        .record(z.enum(CLI_RUNTIME_IDS), z.string().optional())
+        .optional(),
+      cliReasoningEffortByModel: z.record(z.string(), z.string()).optional(),
+      // Last CLI chat mode (agent/plan) remembered per CLI runtime.
+      cliChatModeByRuntime: z
+        .record(z.enum(CLI_RUNTIME_IDS), z.enum(['agent', 'plan']).optional())
+        .optional(),
+      // Last CLI YOLO flag remembered per CLI runtime.
+      cliAgentYoloEnabledByRuntime: z
+        .record(z.enum(CLI_RUNTIME_IDS), z.boolean().optional())
+        .optional(),
       quickAccessEntries: resilientArraySchema(
         z.discriminatedUnion('type', [
           z.object({ type: z.literal('skill'), name: z.string().min(1) }),
@@ -500,29 +675,27 @@ export const yoloSettingsSchema = z.object({
       chatExportIncludeThinking: false,
       chatExportIncludeToolCalls: false,
       ribbonClickAction: 'sidebar',
+      lastChatSurface: 'chat',
+      lastCliRuntimeId: 'claude-code',
+      cliModelIdByRuntime: {},
+      cliReasoningEffortByModel: {},
+      cliChatModeByRuntime: {},
+      cliAgentYoloEnabledByRuntime: {},
       lastChatPlacement: undefined,
       quickAccessEntries: DEFAULT_CHAT_QUICK_ACCESS_ENTRIES,
     }),
 
   notificationOptions: notificationOptionsSchema,
 
-  learningOptions: z
-    .object({
-      modelId: z.string().catch(''),
-      betaNoticeAcknowledged: z.boolean().catch(false),
-    })
-    .catch({
-      modelId: '',
-      betaNoticeAcknowledged: false,
-    }),
+  learningOptions: z.unknown().optional(),
 
   // Continuation (续写) options
   continuationOptions: z
     .object({
-      // dedicated continuation model
+      // dedicated model for tab completion and selection rewrite (Quick Ask's
+      // "continue" mode uses the panel's own assistant model instead, see
+      // QuickAskPanel's modelClient)
       continuationModelId: z.string().optional(),
-      // enable smart space quick invoke
-      enableSmartSpace: z.boolean().optional(),
       // enable selection chat (Cursor-like text selection actions)
       enableSelectionChat: z.boolean().optional(),
       // persist selected editor block highlight while chatting in sidebar
@@ -533,8 +706,6 @@ export const yoloSettingsSchema = z.object({
       manualContextFolders: z.array(z.string()).optional(),
       // folders that should be fully injected into continuation context
       referenceRuleFolders: z.array(z.string()).optional(),
-      // folders used as the scoped knowledge base for RAG retrieval
-      knowledgeBaseFolders: z.array(z.string()).optional(),
       // override sampling parameters specifically for continuation
       temperature: z.number().min(0).max(2).optional(),
       topP: z.number().min(0).max(1).optional(),
@@ -558,8 +729,12 @@ export const yoloSettingsSchema = z.object({
       tabCompletionConstraints: z.string().optional(),
       // length preset for tab completion prompt constraints
       tabCompletionLengthPreset: z.enum(['short', 'medium', 'long']).optional(),
-      // Smart Space custom quick actions
-      smartSpaceQuickActions: z
+      // Quick Ask "continue" mode quick actions (chips shown when the
+      // continue mode input is empty). Renamed from smartSpaceQuickActions
+      // in v83->v84 — that name predated the Quick Ask "continue" mode and
+      // referenced the now-removed Smart Space panel it originally belonged
+      // to.
+      continuationQuickActions: z
         .array(
           z.object({
             id: z.string(),
@@ -589,25 +764,33 @@ export const yoloSettingsSchema = z.object({
           }),
         )
         .optional(),
-      // Empty-line trigger mode for Smart Space
-      smartSpaceTriggerMode: z
-        .enum(['single-space', 'double-space', 'off'])
-        .optional(),
-      // Smart Space Gemini tools default state
-      smartSpaceUseWebSearch: z.boolean().optional(),
-      smartSpaceUseUrlContext: z.boolean().optional(),
       // enable quick ask feature (@ trigger in empty line)
       enableQuickAsk: z.boolean().optional(),
       // trigger character for quick ask (default: @)
       quickAskTrigger: z.string().optional(),
-      // quick ask mode: support legacy ask/edit values and current chat/agent values
-      quickAskMode: z.enum(['ask', 'edit', 'edit-direct', 'agent']).optional(),
+      // Quick Ask mode. The UI only ever persists 'ask'/'agent'/'continue' —
+      // 'edit' and 'edit-direct' are kept here only so a leftover legacy
+      // value in an old data.json doesn't fail this whole continuationOptions
+      // object's validation (see the single .catch() below). Callers
+      // normalize any unrecognized value, including these legacy ones, to
+      // 'ask'.
+      quickAskMode: z
+        .enum(['ask', 'edit', 'edit-direct', 'agent', 'continue'])
+        .optional(),
       // auto dock quick ask to editor top right after sending
       quickAskAutoDockToTopRight: z.boolean().optional(),
       // quick ask context chars before cursor
       quickAskContextBeforeChars: z.number().int().min(0).optional(),
       // quick ask context chars after cursor
       quickAskContextAfterChars: z.number().int().min(0).optional(),
+      // Knowledge bases the Sparkle panel's similar-notes list searches.
+      // Undefined — the default — means every configured base, merged, and
+      // stays that way as bases are added: "all" is a rule here, not a
+      // snapshot of the ids that existed when the user chose it. A non-empty
+      // list restricts the search to those bases; ids whose bases no longer
+      // exist are dropped, and a selection left empty degrades back to "every
+      // base" at query time (see `core/rag/similarNotes.ts`).
+      similarNotesKnowledgeBaseIds: z.array(z.string()).optional(),
       // whether a failed streaming primary request should recover once with non-stream fallback
       streamFallbackRecoveryEnabled: z.boolean().optional(),
       // timeout for the primary request before recovery is considered
@@ -622,13 +805,11 @@ export const yoloSettingsSchema = z.object({
       continuationModelId:
         DEFAULT_CHAT_MODELS.find((v) => v.id === DEFAULT_CHAT_TITLE_MODEL_ID)
           ?.id ?? '',
-      enableSmartSpace: true,
       enableSelectionChat: true,
       persistSelectionHighlight: true,
       manualContextEnabled: false,
       manualContextFolders: [],
       referenceRuleFolders: [],
-      knowledgeBaseFolders: [],
       stream: true,
       maxContinuationChars: 8000,
       enableTabCompletion: false,
@@ -640,17 +821,15 @@ export const yoloSettingsSchema = z.object({
       tabCompletionSystemPrompt: DEFAULT_TAB_COMPLETION_SYSTEM_PROMPT,
       tabCompletionConstraints: '',
       tabCompletionLengthPreset: DEFAULT_TAB_COMPLETION_LENGTH_PRESET,
-      smartSpaceQuickActions: undefined,
+      continuationQuickActions: undefined,
       selectionChatActions: undefined,
-      smartSpaceTriggerMode: 'single-space',
-      smartSpaceUseWebSearch: false,
-      smartSpaceUseUrlContext: false,
       enableQuickAsk: true,
       quickAskTrigger: '@',
       quickAskMode: 'ask',
       quickAskAutoDockToTopRight: true,
       quickAskContextBeforeChars: 5000,
       quickAskContextAfterChars: 2000,
+      similarNotesKnowledgeBaseIds: undefined,
       streamFallbackRecoveryEnabled: true,
       primaryRequestTimeoutMs: DEFAULT_MODEL_REQUEST_TIMEOUT_MS,
     }),

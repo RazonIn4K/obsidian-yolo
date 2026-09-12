@@ -10,6 +10,7 @@ jest.mock('lodash.isequal', () => {
 })
 
 const fakeClientInstances: FakeClient[] = []
+const OBSIDIAN_CONFIG_DIR = ['.', 'obsidian'].join('')
 
 class FakeClient {
   public onclose: (() => void) | undefined
@@ -35,6 +36,12 @@ class FakeClient {
 
   async listTools(): Promise<{ tools: unknown[] }> {
     return this.listToolsMock()
+  }
+
+  // Part of the real SDK Client contract; the manager reads it after a
+  // successful connect to label the model-facing tool catalog.
+  getServerVersion(): { name: string; version: string } | undefined {
+    return undefined
   }
 
   async callTool(
@@ -103,11 +110,12 @@ const httpServerConfig = (id = 'demo'): McpServerConfig => ({
 
 const buildManager = () => {
   const manager = new McpManager({
-    app: { vault: {} } as unknown as App,
+    pluginId: 'test-plugin',
+    app: { vault: { configDir: OBSIDIAN_CONFIG_DIR } } as unknown as App,
     settings: {
       mcp: {
         servers: [],
-        builtinToolOptions: {},
+        builtinCapabilityOptions: {},
       },
       webSearch: {
         providers: [],
@@ -176,7 +184,7 @@ describe('McpManager self-heal', () => {
     ).createClientTransport = createClientTransport
 
     await manager.handleSettingsUpdate({
-      mcp: { servers: [httpServerConfig()], builtinToolOptions: {} },
+      mcp: { servers: [httpServerConfig()], builtinCapabilityOptions: {} },
       webSearch: {
         providers: [],
         defaultProviderId: undefined,
@@ -209,7 +217,7 @@ describe('McpManager self-heal', () => {
     const manager = buildManager()
 
     await manager.handleSettingsUpdate({
-      mcp: { servers: [stdioServerConfig()], builtinToolOptions: {} },
+      mcp: { servers: [stdioServerConfig()], builtinCapabilityOptions: {} },
       webSearch: {
         providers: [],
         defaultProviderId: undefined,
@@ -246,7 +254,7 @@ describe('McpManager self-heal', () => {
     const manager = buildManager()
 
     await manager.handleSettingsUpdate({
-      mcp: { servers: [stdioServerConfig()], builtinToolOptions: {} },
+      mcp: { servers: [stdioServerConfig()], builtinCapabilityOptions: {} },
       webSearch: {
         providers: [],
         defaultProviderId: undefined,
@@ -298,7 +306,7 @@ describe('McpManager self-heal', () => {
     const manager = buildManager()
 
     await manager.handleSettingsUpdate({
-      mcp: { servers: [stdioServerConfig()], builtinToolOptions: {} },
+      mcp: { servers: [stdioServerConfig()], builtinCapabilityOptions: {} },
       webSearch: {
         providers: [],
         defaultProviderId: undefined,
@@ -343,7 +351,7 @@ describe('McpManager self-heal', () => {
     const manager = buildManager()
 
     await manager.handleSettingsUpdate({
-      mcp: { servers: [stdioServerConfig()], builtinToolOptions: {} },
+      mcp: { servers: [stdioServerConfig()], builtinCapabilityOptions: {} },
       webSearch: {
         providers: [],
         defaultProviderId: undefined,
@@ -379,7 +387,7 @@ describe('McpManager self-heal', () => {
             },
           },
         ],
-        builtinToolOptions: {},
+        builtinCapabilityOptions: {},
       },
       webSearch: {
         providers: [],
@@ -414,7 +422,7 @@ describe('McpManager self-heal', () => {
     const manager = buildManager()
 
     await manager.handleSettingsUpdate({
-      mcp: { servers: [stdioServerConfig()], builtinToolOptions: {} },
+      mcp: { servers: [stdioServerConfig()], builtinCapabilityOptions: {} },
       webSearch: {
         providers: [],
         defaultProviderId: undefined,

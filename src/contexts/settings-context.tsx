@@ -1,10 +1,13 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { YoloSettings } from '../settings/schema/setting.types'
 
 type SettingsContextType = {
   settings: YoloSettings
-  setSettings: (newSettings: YoloSettings) => void | Promise<void>
+  setSettings: (newSettings: YoloSettings) => Promise<boolean>
+  updateSettings: (
+    updater: (current: YoloSettings) => YoloSettings,
+  ) => Promise<boolean>
 }
 
 // Settings context
@@ -20,15 +23,18 @@ export const SettingsProvider = ({
 }: {
   children: React.ReactNode
   settings: YoloSettings
-  setSettings: (newSettings: YoloSettings) => void | Promise<void>
+  setSettings: (newSettings: YoloSettings) => Promise<boolean>
   addSettingsChangeListener: (
     listener: (newSettings: YoloSettings) => void,
   ) => () => void
 }) => {
   const [settingsCached, setSettingsCached] = useState(initialSettings)
+  const latestSettingsRef = useRef(initialSettings)
+  const updateTailRef = useRef<Promise<void>>(Promise.resolve())
 
   useEffect(() => {
     const removeListener = addSettingsChangeListener((newSettings) => {
+      latestSettingsRef.current = newSettings
       setSettingsCached(newSettings)
     })
 
@@ -37,9 +43,28 @@ export const SettingsProvider = ({
     }
   }, [addSettingsChangeListener, setSettings])
 
+  const updateSettings = useCallback(
+    (updater: (current: YoloSettings) => YoloSettings): Promise<boolean> => {
+      const update = updateTailRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const nextSettings = updater(latestSettingsRef.current)
+          const saved = await setSettings(nextSettings)
+          if (saved) latestSettingsRef.current = nextSettings
+          return saved
+        })
+      updateTailRef.current = update.then(
+        () => undefined,
+        () => undefined,
+      )
+      return update
+    },
+    [setSettings],
+  )
+
   const value = useMemo(
-    () => ({ settings: settingsCached, setSettings }),
-    [settingsCached, setSettings],
+    () => ({ settings: settingsCached, setSettings, updateSettings }),
+    [settingsCached, setSettings, updateSettings],
   )
 
   return (

@@ -1,46 +1,5 @@
 jest.mock('obsidian')
 
-jest.mock('../../utils/llm/extract-markdown-images', () => ({
-  extractMarkdownImages: jest
-    .fn()
-    .mockResolvedValue({ contentParts: undefined }),
-}))
-
-// Mock pdf-lib for the native PDF slice tests below.
-jest.mock('pdf-lib', () => {
-  let _pageCount = 3
-  const makeDoc = (pageCount: number) => ({
-    getPageCount: () => pageCount,
-    copyPages: jest.fn((_src: unknown, indices: number[]) =>
-      Promise.resolve(indices.map(() => ({}))),
-    ),
-    addPage: jest.fn(),
-    save: jest.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
-  })
-  return {
-    PDFDocument: {
-      load: jest.fn(async () => makeDoc(_pageCount)),
-      create: jest.fn(async () => makeDoc(0)),
-      __setPageCount: (n: number) => {
-        _pageCount = n
-      },
-    },
-  }
-})
-
-// Mock slicePdfPages so we can control success/failure per test.
-jest.mock('../../utils/pdf/slicePdfPages', () => ({
-  PdfSliceError: class PdfSliceError extends Error {
-    kind: string
-    constructor(kind: string, message: string) {
-      super(message)
-      this.name = 'PdfSliceError'
-      this.kind = kind
-    }
-  },
-  slicePdfPages: jest.fn(),
-}))
-
 jest.mock('../agent/subagent/runner', () => ({
   runSubagent: jest.fn().mockResolvedValue({
     accepted: true,
@@ -66,12 +25,10 @@ jest.mock('../browser/activeWebviewReader', () => ({
       this.name = 'BrowserReadFailure'
     }
   },
-  readActiveWebviewPage: jest.fn(),
   readActiveWebviewHtml: jest.fn(),
 }))
 
 import { App, TFile, TFolder } from 'obsidian'
-import { PDFDocument } from 'pdf-lib'
 
 import type { YoloSettings } from '../../settings/schema/setting.types'
 import {
@@ -79,38 +36,67 @@ import {
   createCompleteToolCallArguments,
 } from '../../types/tool-call.types'
 import { editUndoSnapshotStore } from '../../utils/chat/editUndoSnapshotStore'
-import { extractMarkdownImages } from '../../utils/llm/extract-markdown-images'
-import { extractPdfText } from '../../utils/pdf/extractPdfText'
-import { renderPdfPagesToImages } from '../../utils/pdf/renderPdfPagesToImages'
-import { PdfSliceError, slicePdfPages } from '../../utils/pdf/slicePdfPages'
+import {
+  getPendingDangerousBashApproval,
+  resolveDangerousBashApproval,
+} from '../agent/bash/dangerousOperationGate'
 import { runSubagent } from '../agent/subagent/runner'
 import { findWebviewHandleByPageId } from '../browser/activeWebviewProbe'
-import {
-  readActiveWebviewHtml,
-  readActiveWebviewPage,
-} from '../browser/activeWebviewReader'
-import type { RAGEngine } from '../rag/ragEngine'
+import { readActiveWebviewHtml } from '../browser/activeWebviewReader'
+import type {
+  RuntimeComponentId,
+  RuntimeComponentLease,
+} from '../runtime-components/contracts'
+import { setRuntimeComponentAcquirerForTests } from '../runtime-components/runtimeComponentAccess'
+import { executeBuiltinTool } from '../tools/dispatcher'
+import type { LocalToolCallResult, ToolContext } from '../tools/types'
 
 import { buildJsSandboxToolDescription } from './jsSandboxSettings'
 import {
   JS_SANDBOX_BROWSER_READ_DEFAULT_MAX_KB,
   JS_SANDBOX_DB_QUERY_DEFAULT_MAX_LIMIT,
   JS_SANDBOX_VAULT_LIST_MAX_ENTRIES,
+  buildJsSandboxProxyHandlers,
   formatJsSandboxToolText,
 } from './jsSandboxTool'
 import {
-  buildJsSandboxProxyHandlers,
-  callLocalFileTool,
+  fromModelToolName,
   getLocalFileTools,
   isLocalFsWriteToolName,
-  parseBrowserReadPageId,
   parseLocalFsActionFromToolArgs,
   recoverLikelyEscapedBackslashSequences,
+  toModelToolName,
 } from './localFileTools'
+
+/**
+ * The old `callLocalFileTool` switch was deleted once every built-in tool
+ * lived in the registry (docs/plans/2026-08-15-tool-registry, D12). These
+ * suites are the original behavioural coverage for those tools, so they
+ * stay — re-pointed at the one remaining execution path. The adapter keeps
+ * their call shape unchanged so the re-point is visibly a boundary swap and
+ * nothing else.
+ */
+const callLocalFileTool = ({
+  toolName,
+  args,
+  ...context
+}: ToolContext & {
+  toolName: string
+  args: Record<string, unknown>
+}): Promise<LocalToolCallResult> =>
+  executeBuiltinTool(toolName, args, {
+    // `delegate_subagent` used to import `runner.ts` itself; it now receives
+    // it through `ToolContext` (mcpManager.ts does the same injection in
+    // production). Defaulted here so the suites below keep asserting against
+    // the module mock at the top of this file, and still overridable per call.
+    runSubagent: runSubagent as unknown as ToolContext['runSubagent'],
+    ...context,
+  })
 
 afterEach(() => {
   editUndoSnapshotStore.clear()
   ;(runSubagent as jest.Mock).mockClear()
+  setRuntimeComponentAcquirerForTests(null)
 })
 
 describe('recoverLikelyEscapedBackslashSequences', () => {
@@ -269,6 +255,332 @@ describe('js sandbox vault list handler', () => {
     await expect(handlers.vaultReadText('notes/a.md')).resolves.toBe(
       'content:notes/a.md',
     )
+  })
+
+  describe('YOLO user data root exclusion', () => {
+    const settings = { yolo: { baseDir: 'YOLO' } } as unknown as YoloSettings
+
+    it('excludes the user data root from vault.list', async () => {
+      const chatFile = makeFile('YOLO/data/chats/v1_abc.json')
+      const dataFolder = makeFolder('YOLO/data', [chatFile])
+      const noteFile = makeFile('Notes/a.md')
+      const yoloFolder = makeFolder('YOLO', [dataFolder])
+      const root = makeFolder('', [yoloFolder, noteFile])
+      const handlers = buildJsSandboxProxyHandlers(
+        makeApp(root, [yoloFolder, dataFolder, chatFile, noteFile]),
+        { allowVaultRead: true },
+        undefined,
+        settings,
+      )
+      if (!handlers.vaultList) throw new Error('expected vaultList handler')
+
+      await expect(
+        handlers.vaultList('/', { recursive: true }),
+      ).resolves.toEqual([
+        {
+          kind: 'file',
+          path: 'Notes/a.md',
+          name: 'a.md',
+          size: 10,
+          mtime: 1000,
+        },
+        { kind: 'dir', path: 'YOLO', name: 'YOLO' },
+      ])
+    })
+
+    it('reports the user data root itself as a missing folder for vault.list', async () => {
+      const dataFolder = makeFolder('YOLO/data')
+      const yoloFolder = makeFolder('YOLO', [dataFolder])
+      const root = makeFolder('', [yoloFolder])
+      const handlers = buildJsSandboxProxyHandlers(
+        makeApp(root, [yoloFolder, dataFolder]),
+        { allowVaultRead: true },
+        undefined,
+        settings,
+      )
+      if (!handlers.vaultList) throw new Error('expected vaultList handler')
+
+      await expect(handlers.vaultList('YOLO/data')).rejects.toThrow(
+        'Folder not found: YOLO/data',
+      )
+    })
+
+    it('reports null (not found) for vault.readText under the user data root', async () => {
+      const chatFile = makeFile('YOLO/data/chats/v1_abc.json')
+      const root = makeFolder('', [chatFile])
+      const handlers = buildJsSandboxProxyHandlers(
+        makeApp(root, [chatFile]),
+        { allowVaultRead: true },
+        undefined,
+        settings,
+      )
+      if (!handlers.vaultReadText) {
+        throw new Error('expected vaultReadText handler')
+      }
+
+      await expect(
+        handlers.vaultReadText('YOLO/data/chats/v1_abc.json'),
+      ).resolves.toBeNull()
+    })
+
+    it('reports null (not found) for vault.readBinary under the user data root', async () => {
+      const chatFile = makeFile('YOLO/data/chats/v1_abc.json')
+      const root = makeFolder('', [chatFile])
+      const handlers = buildJsSandboxProxyHandlers(
+        makeApp(root, [chatFile]),
+        { allowVaultRead: true },
+        undefined,
+        settings,
+      )
+      if (!handlers.vaultReadBinary) {
+        throw new Error('expected vaultReadBinary handler')
+      }
+
+      await expect(
+        handlers.vaultReadBinary('YOLO/data/chats/v1_abc.json'),
+      ).resolves.toBeNull()
+    })
+  })
+
+  describe('workspace scope exclusion (issue #577)', () => {
+    const scope = { enabled: true, include: ['Notes'], exclude: [] }
+
+    it('throws for an explicit vault.readText request outside scope, instead of returning null', async () => {
+      const secretFile = makeFile('Private/secret.md')
+      const root = makeFolder('', [secretFile])
+      const handlers = buildJsSandboxProxyHandlers(
+        makeApp(root, [secretFile]),
+        { allowVaultRead: true },
+        undefined,
+        undefined,
+        scope,
+      )
+      if (!handlers.vaultReadText) {
+        throw new Error('expected vaultReadText handler')
+      }
+
+      // Must reject, not resolve to null — null is this handler's
+      // established "file genuinely does not exist" signal, and silently
+      // returning it here would let the model wrongly conclude the file is
+      // missing rather than merely out of its workspace scope.
+      await expect(handlers.vaultReadText('Private/secret.md')).rejects.toThrow(
+        'Path "Private/secret.md" is outside this agent\'s workspace scope.',
+      )
+    })
+
+    it('throws for an explicit vault.readBinary request outside scope', async () => {
+      const secretFile = makeFile('Private/secret.png')
+      const root = makeFolder('', [secretFile])
+      const handlers = buildJsSandboxProxyHandlers(
+        makeApp(root, [secretFile]),
+        { allowVaultRead: true },
+        undefined,
+        undefined,
+        scope,
+      )
+      if (!handlers.vaultReadBinary) {
+        throw new Error('expected vaultReadBinary handler')
+      }
+
+      await expect(
+        handlers.vaultReadBinary('Private/secret.png'),
+      ).rejects.toThrow(
+        'Path "Private/secret.png" is outside this agent\'s workspace scope.',
+      )
+    })
+
+    it('silently drops out-of-scope entries from vault.list instead of erroring', async () => {
+      const inScopeFile = makeFile('Notes/a.md')
+      const outOfScopeFile = makeFile('Private/secret.md')
+      const root = makeFolder('', [inScopeFile, outOfScopeFile])
+      const handlers = buildJsSandboxProxyHandlers(
+        makeApp(root, [inScopeFile, outOfScopeFile]),
+        { allowVaultRead: true },
+        undefined,
+        undefined,
+        scope,
+      )
+      if (!handlers.vaultList) throw new Error('expected vaultList handler')
+
+      // Only the in-scope file is returned — the out-of-scope one is
+      // silently dropped, not reported as an error: enumeration must not
+      // reveal "there's something here you can't see".
+      await expect(handlers.vaultList('/')).resolves.toEqual([
+        {
+          kind: 'file',
+          path: 'Notes/a.md',
+          name: 'a.md',
+          size: 10,
+          mtime: 1000,
+        },
+      ])
+    })
+
+    it('allows traversal through an ancestor of an include rule in vault.list', async () => {
+      const nestedFile = makeFile('Notes/Sub/a.md')
+      const subFolder = makeFolder('Notes/Sub', [nestedFile])
+      const notesFolder = makeFolder('Notes', [subFolder])
+      const includeAncestorScope = {
+        enabled: true,
+        include: ['Notes/Sub'],
+        exclude: [],
+      }
+      const root = makeFolder('', [notesFolder])
+      const handlers = buildJsSandboxProxyHandlers(
+        makeApp(root, [notesFolder, subFolder, nestedFile]),
+        { allowVaultRead: true },
+        undefined,
+        undefined,
+        includeAncestorScope,
+      )
+      if (!handlers.vaultList) throw new Error('expected vaultList handler')
+
+      // "Notes" is only an ancestor of the include rule "Notes/Sub", not
+      // in-scope content itself — listing it must still succeed so the
+      // agent can descend toward "Notes/Sub".
+      await expect(handlers.vaultList('Notes')).resolves.toEqual([
+        { kind: 'dir', path: 'Notes/Sub', name: 'Sub' },
+      ])
+    })
+
+    it('drops out-of-scope rows from db.search', async () => {
+      const root = makeFolder('', [])
+      const processQuery = jest.fn().mockResolvedValue([
+        {
+          id: 1,
+          path: 'Notes/a.md',
+          content: 'in scope',
+          similarity: 0.9,
+          metadata: { startLine: 1, endLine: 5 },
+        },
+        {
+          id: 2,
+          path: 'Private/secret.md',
+          content: 'shh',
+          similarity: 0.8,
+          metadata: { startLine: 1, endLine: 5 },
+        },
+      ])
+      const handlers = buildJsSandboxProxyHandlers(
+        makeApp(root, []),
+        { allowDbQuery: true },
+        {
+          listKnowledgeBases: () => [
+            {
+              id: 'kb-a',
+              name: 'kb-a',
+              description: '',
+              include: [],
+              exclude: [],
+            },
+          ],
+          getRagEngine: () => Promise.resolve({ processQuery } as never),
+        },
+        undefined,
+        scope,
+      )
+      if (!handlers.dbQuery) throw new Error('expected dbQuery handler')
+
+      // The RAG index spans the whole vault and each row carries the chunk's
+      // real text, so an unfiltered search is a read path around workspace
+      // scope. Retrieval is an enumeration — denied rows vanish silently.
+      const rows = (await handlers.dbQuery('search', {
+        query: 'secret',
+      })) as Array<{ path: string }>
+      expect(rows.map((row) => row.path)).toEqual(['Notes/a.md'])
+      expect(JSON.stringify(rows)).not.toContain('shh')
+    })
+
+    it('pre-filters db.search at the vector-store scan by passing the workspace scope to processQuery', async () => {
+      const root = makeFolder('', [])
+      const processQuery = jest.fn().mockResolvedValue([])
+      const handlers = buildJsSandboxProxyHandlers(
+        makeApp(root, []),
+        { allowDbQuery: true },
+        {
+          listKnowledgeBases: () => [
+            {
+              id: 'kb-a',
+              name: 'kb-a',
+              description: '',
+              include: [],
+              exclude: [],
+            },
+          ],
+          getRagEngine: () => Promise.resolve({ processQuery } as never),
+        },
+        undefined,
+        scope,
+      )
+      if (!handlers.dbQuery) throw new Error('expected dbQuery handler')
+
+      await handlers.dbQuery('search', { query: 'secret' })
+
+      // No `pathScope` here — db.search has no path argument — so the scope
+      // passed to the vector store is derived purely from the workspace
+      // scope, plus the always-on hidden user-data root exclude.
+      expect(processQuery).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scope: {
+            files: ['Notes'],
+            folders: ['Notes'],
+            exclude: ['YOLO/data'],
+          },
+        }),
+      )
+    })
+
+    it('still excludes the hidden user-data root from db.search when no workspace scope is configured', async () => {
+      const root = makeFolder('', [])
+      const processQuery = jest.fn().mockResolvedValue([])
+      const handlers = buildJsSandboxProxyHandlers(
+        makeApp(root, []),
+        { allowDbQuery: true },
+        {
+          listKnowledgeBases: () => [
+            {
+              id: 'kb-a',
+              name: 'kb-a',
+              description: '',
+              include: [],
+              exclude: [],
+            },
+          ],
+          getRagEngine: () => Promise.resolve({ processQuery } as never),
+        },
+        undefined,
+        undefined,
+      )
+      if (!handlers.dbQuery) throw new Error('expected dbQuery handler')
+
+      await handlers.dbQuery('search', { query: 'secret' })
+
+      expect(processQuery).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scope: { files: [], folders: [], exclude: ['YOLO/data'] },
+        }),
+      )
+    })
+
+    it('exempts an allowed skill path from workspace scope for vault.readText', async () => {
+      const skillFile = makeFile('Skills/pkg/reference.md')
+      const root = makeFolder('', [skillFile])
+      const handlers = buildJsSandboxProxyHandlers(
+        makeApp(root, [skillFile]),
+        { allowVaultRead: true },
+        undefined,
+        undefined,
+        scope,
+        ['Skills/pkg/SKILL.md'],
+      )
+      if (!handlers.vaultReadText) {
+        throw new Error('expected vaultReadText handler')
+      }
+
+      await expect(
+        handlers.vaultReadText('Skills/pkg/reference.md'),
+      ).resolves.toBe('content:Skills/pkg/reference.md')
+    })
   })
 })
 
@@ -431,16 +743,16 @@ describe('local fs tool action helpers', () => {
     ).toBe('write')
     expect(
       parseLocalFsActionFromToolArgs({
-        toolName: 'fs_delete',
-        args: { path: 'tmp', recursive: true },
+        toolName: 'bash',
+        args: { command: 'rm tmp' },
       }),
-    ).toBe('delete')
+    ).toBeNull()
   })
 
   it('recognizes write tool names with local prefixes', () => {
     expect(isLocalFsWriteToolName('fs_edit')).toBe(true)
-    expect(isLocalFsWriteToolName('yolo_local__fs_move')).toBe(true)
-    expect(isLocalFsWriteToolName('yolo_local__fs_read')).toBe(false)
+    expect(isLocalFsWriteToolName('yolo_local__fs_write')).toBe(true)
+    expect(isLocalFsWriteToolName('yolo_local__bash')).toBe(false)
   })
 
   it('routes fs_edit approval through apply review', async () => {
@@ -451,7 +763,10 @@ describe('local fs tool action helpers', () => {
     const modify = jest.fn()
     const read = jest.fn().mockResolvedValue('hello world')
     const openApplyReview = jest.fn().mockImplementation(async (state) => {
-      state.callbacks?.onComplete?.({ finalContent: 'hello changed' })
+      state.callbacks?.onComplete?.({
+        finalContent: 'hello changed',
+        review: { totalChanges: 1, rejectedChanges: [] },
+      })
       return true
     })
 
@@ -489,6 +804,121 @@ describe('local fs tool action helpers', () => {
       totalAddedLines: 1,
       totalRemovedLines: 1,
       undoStatus: 'available',
+    })
+    const payload = JSON.parse(result.text) as Record<string, unknown>
+    expect(payload).toMatchObject({
+      tool: 'fs_edit',
+      path: 'note.md',
+      changed: true,
+      review: { outcome: 'accepted' },
+      message: 'Applied reviewed edit.',
+    })
+    expect(payload).not.toHaveProperty('appliedCount')
+    expect(payload).not.toHaveProperty('operationResults')
+  })
+
+  it('reports partially rejected fs_edit review with compact previews', async () => {
+    const file = Object.assign(new TFile(), {
+      path: 'note.md',
+      stat: { size: 20 },
+    })
+    const proposedText =
+      'This proposed paragraph is intentionally much longer than forty characters.'
+    const openApplyReview = jest.fn().mockImplementation(async (state) => {
+      state.callbacks?.onComplete?.({
+        finalContent: 'hello changed',
+        review: {
+          totalChanges: 2,
+          rejectedChanges: [
+            {
+              index: 2,
+              originalText: 'world',
+              proposedText,
+            },
+          ],
+        },
+      })
+      return true
+    })
+
+    const result = await callLocalFileTool({
+      app: {
+        vault: {
+          getAbstractFileByPath: jest.fn().mockReturnValue(file),
+          read: jest.fn().mockResolvedValue('hello world'),
+          modify: jest.fn(),
+        },
+      } as unknown as App,
+      openApplyReview,
+      toolName: 'fs_edit',
+      args: {
+        path: 'note.md',
+        oldText: 'world',
+        newText: 'changed',
+      },
+      requireReview: true,
+    })
+
+    expect(result.status).toBe(ToolCallResponseStatus.Success)
+    if (result.status !== ToolCallResponseStatus.Success) {
+      throw new Error('expected success')
+    }
+    const payload = JSON.parse(result.text) as {
+      review: {
+        outcome: string
+        rejected: Array<{ index: number; preview: string }>
+      }
+      message: string
+    }
+    expect(payload.review.outcome).toBe('partially_rejected')
+    expect(payload.review.rejected[0]?.index).toBe(2)
+    expect(Array.from(payload.review.rejected[0]?.preview ?? '')).toHaveLength(
+      40,
+    )
+    expect(payload.review.rejected[0]?.preview.endsWith('…')).toBe(true)
+    expect(payload.message).toContain('Do not retry')
+  })
+
+  it('returns rejected when every reviewed fs_edit change is declined', async () => {
+    const file = Object.assign(new TFile(), {
+      path: 'note.md',
+      stat: { size: 20 },
+    })
+    const openApplyReview = jest.fn().mockImplementation(async (state) => {
+      state.callbacks?.onComplete?.({
+        finalContent: 'hello world',
+        review: {
+          totalChanges: 1,
+          rejectedChanges: [
+            { index: 1, originalText: 'world', proposedText: 'changed' },
+          ],
+        },
+      })
+      return true
+    })
+
+    const result = await callLocalFileTool({
+      app: {
+        vault: {
+          getAbstractFileByPath: jest.fn().mockReturnValue(file),
+          read: jest.fn().mockResolvedValue('hello world'),
+          modify: jest.fn(),
+        },
+      } as unknown as App,
+      openApplyReview,
+      toolName: 'fs_edit',
+      args: {
+        path: 'note.md',
+        oldText: 'world',
+        newText: 'changed',
+      },
+      requireReview: true,
+    })
+
+    expect(result).toEqual({
+      status: ToolCallResponseStatus.Rejected,
+      reason:
+        'Explicit user decision: this change was rejected in the review UI. This is not an edit or matching failure. Do not retry it with another locator or tool this turn; acknowledge the decision and wait for the user.',
     })
   })
 
@@ -698,7 +1128,7 @@ describe('local fs tool action helpers', () => {
     expect(result.status).toBe(ToolCallResponseStatus.Error)
     if (result.status === ToolCallResponseStatus.Error) {
       expect(result.error).toContain('first line exists at line 1')
-      expect(result.error).toContain('fs_read')
+      expect(result.error).toContain('bash')
       expect(result.error).not.toContain('lineEndingNormalized')
     }
   })
@@ -731,7 +1161,7 @@ describe('local fs tool action helpers', () => {
     expect(result.status).toBe(ToolCallResponseStatus.Error)
     if (result.status === ToolCallResponseStatus.Error) {
       expect(result.error).toContain('Could not find the text to replace')
-      expect(result.error).toContain('fs_read')
+      expect(result.error).toContain('bash')
     }
   })
 
@@ -909,1033 +1339,6 @@ describe('local fs tool action helpers', () => {
     ).toMatchObject({
       beforeExists: false,
       afterExists: true,
-    })
-  })
-
-  it('returns edit summary metadata for fs_delete (file)', async () => {
-    const file = Object.assign(new TFile(), {
-      path: 'note.md',
-      stat: { size: 20 },
-    })
-    const read = jest.fn().mockResolvedValue(['one', 'two'].join('\n'))
-    const trashFile = jest.fn()
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getAbstractFileByPath: jest.fn().mockReturnValue(file),
-          read,
-        },
-        fileManager: {
-          trashFile,
-        },
-      } as unknown as App,
-      toolCallId: 'tool-call-delete-1',
-      toolName: 'fs_delete',
-      args: {
-        path: 'note.md',
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    expect(trashFile).toHaveBeenCalledWith(file)
-    if (result.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-    expect(result.metadata?.editSummary).toMatchObject({
-      totalFiles: 1,
-      totalAddedLines: 0,
-      totalRemovedLines: 2,
-      files: [{ operation: 'delete' }],
-    })
-    expect(
-      editUndoSnapshotStore.get('tool-call-delete-1', 'note.md'),
-    ).toMatchObject({
-      beforeExists: true,
-      afterExists: false,
-    })
-  })
-
-  it('supports fs_read full operation', async () => {
-    const file = Object.assign(new TFile(), {
-      path: 'note.md',
-      stat: { size: 20 },
-    })
-    const read = jest.fn().mockResolvedValue(['one', 'two', 'three'].join('\n'))
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getFileByPath: jest.fn().mockReturnValue(file),
-          read,
-        },
-      } as unknown as App,
-      toolCallId: 'read-call-1',
-      toolName: 'fs_read',
-      args: {
-        paths: ['note.md'],
-        operation: {
-          type: 'full',
-        },
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-    const payload = JSON.parse(result.text) as {
-      toolCallId: string | null
-      requestedOperation: { type: string; modality: string }
-      results: Array<{
-        ok: boolean
-        content: string
-        totalLines: number
-        returnedRange?: { startLine: number | null; endLine: number | null }
-      }>
-    }
-    expect(payload.toolCallId).toBe('read-call-1')
-    expect(payload.requestedOperation).toMatchObject({
-      type: 'full',
-    })
-    // modality omitted by caller → echoed as undefined / dropped from JSON.
-    expect(payload.requestedOperation.modality).toBeUndefined()
-    expect(payload.results[0]).toMatchObject({
-      ok: true,
-      content: ['1|one', '2|two', '3|three'].join('\n'),
-      totalLines: 3,
-    })
-    expect(payload.results[0].returnedRange).toBeUndefined()
-    expect(result.metadata?.fsReadOperation).toEqual({
-      type: 'full',
-      isPdf: false,
-    })
-  })
-
-  it('defaults fs_read to full operation when operation is omitted', async () => {
-    const file = Object.assign(new TFile(), {
-      path: 'note.md',
-      stat: { size: 20 },
-    })
-    const read = jest.fn().mockResolvedValue(['one', 'two'].join('\n'))
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getFileByPath: jest.fn().mockReturnValue(file),
-          read,
-        },
-      } as unknown as App,
-      toolCallId: 'read-call-default-full',
-      toolName: 'fs_read',
-      args: {
-        paths: ['note.md'],
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-    const payload = JSON.parse(result.text) as {
-      toolCallId: string | null
-      requestedOperation: { type: string; modality: string }
-      results: Array<{
-        ok: boolean
-        content: string
-        totalLines: number
-        returnedRange?: { startLine: number | null; endLine: number | null }
-      }>
-    }
-    expect(payload.toolCallId).toBe('read-call-default-full')
-    expect(payload.requestedOperation).toMatchObject({
-      type: 'full',
-    })
-    expect(payload.requestedOperation.modality).toBeUndefined()
-    expect(payload.results[0]).toMatchObject({
-      ok: true,
-      content: ['1|one', '2|two'].join('\n'),
-      totalLines: 2,
-    })
-    expect(payload.results[0].returnedRange).toBeUndefined()
-  })
-
-  describe('fs_read browser:// paths', () => {
-    const pagePath = 'browser://page_ab12cd34_ef56gh78'
-    const mockHandle = {
-      pageId: 'page_ab12cd34_ef56gh78',
-      webview: {},
-    }
-
-    beforeEach(() => {
-      jest.mocked(findWebviewHandleByPageId).mockReset()
-      jest.mocked(readActiveWebviewPage).mockReset()
-    })
-
-    it('reads an open web page with readable format and line pagination', async () => {
-      jest
-        .mocked(findWebviewHandleByPageId)
-        .mockReturnValue(mockHandle as never)
-      jest.mocked(readActiveWebviewPage).mockResolvedValue({
-        source: 'core_webviewer',
-        sourceViewType: 'webviewer',
-        url: 'https://example.com/article',
-        title: 'Article',
-        format: 'readable',
-        loading: false,
-        capturedAt: Date.now(),
-        text: ['Intro', 'Body line', 'Tail'].join('\n'),
-        redactions: [],
-      })
-
-      const result = await callLocalFileTool({
-        app: {
-          vault: { getFileByPath: jest.fn().mockReturnValue(null) },
-        } as unknown as App,
-        toolName: 'fs_read',
-        args: {
-          paths: [pagePath],
-          operation: {
-            type: 'lines',
-            startLine: 2,
-            maxLines: 1,
-            format: 'readable',
-          },
-        },
-      })
-
-      expect(result.status).toBe(ToolCallResponseStatus.Success)
-      if (result.status !== ToolCallResponseStatus.Success) {
-        throw new Error('expected success')
-      }
-      const payload = JSON.parse(result.text) as {
-        results: Array<{
-          ok: boolean
-          path: string
-          content: string
-          url?: string
-          title?: string
-          returnedRange?: { startLine: number; endLine: number }
-          hasMoreBelow: boolean
-          nextStartLine: number | null
-        }>
-      }
-      expect(readActiveWebviewPage).toHaveBeenCalledWith(
-        mockHandle,
-        expect.objectContaining({ format: 'readable' }),
-      )
-      expect(payload.results[0]).toMatchObject({
-        ok: true,
-        path: pagePath,
-        content: '2|Body line',
-        url: 'https://example.com/article',
-        title: 'Article',
-        returnedRange: { startLine: 2, endLine: 2 },
-        hasMoreBelow: true,
-        nextStartLine: 3,
-      })
-    })
-
-    it('defaults browser reads to key_visible_info format', async () => {
-      jest
-        .mocked(findWebviewHandleByPageId)
-        .mockReturnValue(mockHandle as never)
-      jest.mocked(readActiveWebviewPage).mockResolvedValue({
-        source: 'core_webviewer',
-        sourceViewType: 'webviewer',
-        url: 'https://example.com',
-        title: 'X',
-        format: 'key_visible_info',
-        loading: false,
-        capturedAt: Date.now(),
-        text: 'Visible summary',
-        redactions: [],
-      })
-
-      const result = await callLocalFileTool({
-        app: {
-          vault: { getFileByPath: jest.fn().mockReturnValue(null) },
-        } as unknown as App,
-        toolName: 'fs_read',
-        args: {
-          paths: [pagePath],
-          operation: {
-            type: 'full',
-          },
-        },
-      })
-
-      expect(result.status).toBe(ToolCallResponseStatus.Success)
-      expect(readActiveWebviewPage).toHaveBeenCalledWith(
-        mockHandle,
-        expect.objectContaining({ format: 'key_visible_info' }),
-      )
-    })
-
-    it('supports key_visible_info format for browser paths', async () => {
-      jest
-        .mocked(findWebviewHandleByPageId)
-        .mockReturnValue(mockHandle as never)
-      jest.mocked(readActiveWebviewPage).mockResolvedValue({
-        source: 'core_webviewer',
-        sourceViewType: 'webviewer',
-        url: 'https://example.com',
-        title: 'X',
-        format: 'key_visible_info',
-        loading: false,
-        capturedAt: Date.now(),
-        text: 'Formula: E = mc^2',
-        redactions: [],
-      })
-
-      const result = await callLocalFileTool({
-        app: {
-          vault: { getFileByPath: jest.fn().mockReturnValue(null) },
-        } as unknown as App,
-        toolName: 'fs_read',
-        args: {
-          paths: [pagePath],
-          operation: {
-            type: 'full',
-            format: 'key_visible_info',
-          },
-        },
-      })
-
-      expect(result.status).toBe(ToolCallResponseStatus.Success)
-      expect(readActiveWebviewPage).toHaveBeenCalledWith(
-        mockHandle,
-        expect.objectContaining({ format: 'key_visible_info' }),
-      )
-    })
-
-    it('returns an error when the target web page tab is missing', async () => {
-      jest.mocked(findWebviewHandleByPageId).mockReturnValue(null)
-
-      const result = await callLocalFileTool({
-        app: {
-          vault: { getFileByPath: jest.fn().mockReturnValue(null) },
-        } as unknown as App,
-        toolName: 'fs_read',
-        args: {
-          paths: [pagePath],
-          operation: { type: 'full' },
-        },
-      })
-
-      expect(result.status).toBe(ToolCallResponseStatus.Success)
-      if (result.status !== ToolCallResponseStatus.Success) {
-        throw new Error('expected success')
-      }
-      const payload = JSON.parse(result.text) as {
-        results: Array<{ ok: boolean; error?: string }>
-      }
-      expect(payload.results[0]).toMatchObject({
-        ok: false,
-        error: expect.stringContaining('No open web page'),
-      })
-    })
-
-    it('rejects browser:// internet URLs with tool guidance', () => {
-      expect(() =>
-        parseBrowserReadPageId('browser://https://example.com/article'),
-      ).toThrow(/browser:\/\/ paths only read open Obsidian web pages/)
-      expect(() =>
-        parseBrowserReadPageId('browser://https://example.com/article'),
-      ).toThrow(/use web_search or web_scrape/)
-    })
-
-    it('rejects page_id paths with appended URL segments', () => {
-      expect(() =>
-        parseBrowserReadPageId('browser://page_ab12cd34_ef56gh78/abcd'),
-      ).toThrow(/Do not append URL paths to a page_id/)
-    })
-  })
-
-  it('reads allowed hidden-directory skills through the skill registry', async () => {
-    // eslint-disable-next-line obsidianmd/hardcoded-config-path -- mock Vault#configDir for adapter paths
-    const configDir = '.obsidian'
-    const hiddenPath = `${configDir}/skills/hidden-open.md`
-    const content = [
-      '---',
-      'name: hidden-open',
-      'description: hidden body',
-      '---',
-      '# Hidden body',
-    ].join('\n')
-    const app = {
-      vault: {
-        configDir,
-        adapter: {
-          exists: jest.fn(
-            async (path: string) => path === `${configDir}/skills`,
-          ),
-          list: jest.fn(async (path: string) =>
-            path === `${configDir}/skills`
-              ? { files: [hiddenPath], folders: [] }
-              : { files: [], folders: [] },
-          ),
-          read: jest.fn(async (path: string) => {
-            if (path !== hiddenPath) {
-              throw new Error(`Unexpected read: ${path}`)
-            }
-            return content
-          }),
-        },
-        getFileByPath: jest.fn().mockReturnValue(null),
-      },
-      metadataCache: {
-        getFileCache: jest.fn().mockReturnValue(undefined),
-      },
-    } as unknown as App
-
-    const result = await callLocalFileTool({
-      app,
-      toolName: 'fs_read',
-      args: {
-        paths: [hiddenPath],
-        operation: {
-          type: 'full',
-        },
-      },
-      allowedSkillPaths: [hiddenPath],
-      settings: {} as YoloSettings,
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-
-    const payload = JSON.parse(result.text) as {
-      results: Array<{
-        ok: boolean
-        path: string
-        content: string
-      }>
-    }
-    expect(payload.results[0]).toMatchObject({
-      ok: true,
-      path: hiddenPath,
-      content: [
-        '1|---',
-        '2|name: hidden-open',
-        '3|description: hidden body',
-        '4|---',
-        '5|# Hidden body',
-      ].join('\n'),
-    })
-  })
-
-  describe('fs_read image reading gating by chat model modalities', () => {
-    const extractMock = extractMarkdownImages as jest.MockedFunction<
-      typeof extractMarkdownImages
-    >
-    const buildSettings = (
-      modalities: Array<'text' | 'vision'> | undefined,
-    ): YoloSettings =>
-      ({
-        chatOptions: {
-          imageReadingEnabled: true,
-          imageCompressionEnabled: false,
-          imageCompressionQuality: 85,
-          externalImageFetchEnabled: false,
-        },
-        chatModels: [
-          {
-            id: 'provider/text-model',
-            providerId: 'provider',
-            model: 'text-model',
-            modalities,
-          },
-        ],
-      }) as unknown as YoloSettings
-
-    const buildCallArgs = (settings: YoloSettings, modelId?: string) => {
-      const file = Object.assign(new TFile(), {
-        path: 'note.md',
-        stat: { size: 64 },
-      })
-      return {
-        app: {
-          vault: {
-            getFileByPath: jest.fn().mockReturnValue(file),
-            read: jest.fn().mockResolvedValue('alpha\n![[img.png]]\nbeta'),
-          },
-        } as unknown as App,
-        toolCallId: 'read-call',
-        toolName: 'fs_read',
-        args: {
-          paths: ['note.md'],
-          operation: { type: 'full' as const },
-        },
-        settings,
-        chatModelId: modelId,
-      }
-    }
-
-    beforeEach(() => {
-      extractMock.mockReset()
-      extractMock.mockResolvedValue({
-        contentParts: [
-          {
-            type: 'image_url',
-            image_url: { url: 'data:image/png;base64,AAA' },
-          },
-        ],
-      } as unknown as Awaited<ReturnType<typeof extractMarkdownImages>>)
-    })
-
-    it('skips image extraction when the active model has declared text-only modalities', async () => {
-      const settings = buildSettings(['text'])
-      const result = await callLocalFileTool(
-        buildCallArgs(settings, 'provider/text-model'),
-      )
-
-      expect(result.status).toBe(ToolCallResponseStatus.Success)
-      expect(extractMock).not.toHaveBeenCalled()
-      if (result.status === ToolCallResponseStatus.Success) {
-        expect(result.contentParts).toBeUndefined()
-      }
-    })
-
-    it('extracts images when the active model declares vision support', async () => {
-      const settings = buildSettings(['text', 'vision'])
-      const result = await callLocalFileTool(
-        buildCallArgs(settings, 'provider/text-model'),
-      )
-
-      expect(result.status).toBe(ToolCallResponseStatus.Success)
-      expect(extractMock).toHaveBeenCalledTimes(1)
-    })
-
-    it('defaults to text-only when the model has no modalities (should not happen post-migration)', async () => {
-      const settings = buildSettings(undefined)
-      const result = await callLocalFileTool(
-        buildCallArgs(settings, 'provider/text-model'),
-      )
-
-      expect(result.status).toBe(ToolCallResponseStatus.Success)
-      expect(extractMock).not.toHaveBeenCalled()
-    })
-
-    it('stays permissive when no chatModelId is passed (non-agent callers)', async () => {
-      const settings = buildSettings(['text'])
-      const result = await callLocalFileTool(buildCallArgs(settings, undefined))
-
-      expect(result.status).toBe(ToolCallResponseStatus.Success)
-      expect(extractMock).toHaveBeenCalledTimes(1)
-    })
-  })
-
-  it('returns full fs_read content without internal character truncation', async () => {
-    const longLine = 'a'.repeat(25_000)
-    const file = Object.assign(new TFile(), {
-      path: 'long-note.md',
-      stat: { size: longLine.length },
-    })
-    const read = jest.fn().mockResolvedValue(longLine)
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getFileByPath: jest.fn().mockReturnValue(file),
-          read,
-        },
-      } as unknown as App,
-      toolName: 'fs_read',
-      args: {
-        paths: ['long-note.md'],
-        operation: {
-          type: 'full',
-        },
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-
-    const payload = JSON.parse(result.text) as {
-      requestedOperation: { type: string; modality: string }
-      results: Array<{
-        ok: boolean
-        content: string
-      }>
-    }
-
-    expect(payload.requestedOperation).toMatchObject({
-      type: 'full',
-    })
-    expect(payload.requestedOperation.modality).toBeUndefined()
-    expect(payload.results[0]).toMatchObject({
-      ok: true,
-      content: `1|${longLine}`,
-    })
-  })
-
-  it('supports fs_read lines operation with numbered output', async () => {
-    const file = Object.assign(new TFile(), {
-      path: 'note.md',
-      stat: { size: 40 },
-    })
-    const read = jest
-      .fn()
-      .mockResolvedValue(['one', 'two', 'three', 'four'].join('\n'))
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getFileByPath: jest.fn().mockReturnValue(file),
-          read,
-        },
-      } as unknown as App,
-      toolName: 'fs_read',
-      args: {
-        paths: ['note.md'],
-        operation: {
-          type: 'lines',
-          startLine: 2,
-          maxLines: 2,
-        },
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-    const payload = JSON.parse(result.text) as {
-      toolCallId: string | null
-      requestedOperation: { type: string; modality: string }
-      results: Array<{
-        ok: boolean
-        content: string
-        returnedRange?: { startLine: number | null; endLine: number | null }
-        hasMoreBelow: boolean
-        nextStartLine: number | null
-      }>
-    }
-    expect(payload.toolCallId).toBeNull()
-    expect(payload.requestedOperation).toEqual({
-      type: 'lines',
-    })
-    expect(payload.results[0]).toMatchObject({
-      ok: true,
-      content: ['2|two', '3|three'].join('\n'),
-      returnedRange: { startLine: 2, endLine: 3 },
-      hasMoreBelow: true,
-      nextStartLine: 4,
-    })
-    expect(result.metadata?.fsReadOperation).toEqual({
-      type: 'lines',
-      startLine: 2,
-      endLine: 3,
-      isPdf: false,
-    })
-  })
-
-  it('rejects removed top-level fs_read line arguments', async () => {
-    const file = Object.assign(new TFile(), {
-      path: 'note.md',
-      stat: { size: 20 },
-    })
-    const read = jest.fn().mockResolvedValue('one\ntwo')
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getFileByPath: jest.fn().mockReturnValue(file),
-          read,
-        },
-      } as unknown as App,
-      toolName: 'fs_read',
-      args: {
-        paths: ['note.md'],
-        startLine: 1,
-        maxLines: 2,
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Error)
-    if (result.status === ToolCallResponseStatus.Error) {
-      expect(result.error).toContain('operation must be a nested JSON object')
-    }
-  })
-
-  describe('fs_read modality parsing', () => {
-    const callRead = async (operation: unknown) => {
-      const file = Object.assign(new TFile(), {
-        path: 'note.md',
-        stat: { size: 5 },
-      })
-      const read = jest.fn().mockResolvedValue('hello')
-      return callLocalFileTool({
-        app: {
-          vault: {
-            getFileByPath: jest.fn().mockReturnValue(file),
-            read,
-          },
-        } as unknown as App,
-        toolName: 'fs_read',
-        args: { paths: ['note.md'], operation },
-      })
-    }
-
-    const expectModality = (
-      result: Awaited<ReturnType<typeof callRead>>,
-      expected: 'text' | 'image' | undefined,
-    ) => {
-      expect(result.status).toBe(ToolCallResponseStatus.Success)
-      if (result.status !== ToolCallResponseStatus.Success) {
-        throw new Error('expected success')
-      }
-      const payload = JSON.parse(result.text) as {
-        requestedOperation: { modality?: string }
-      }
-      // The echo is undefined / missing from JSON when the caller did not
-      // provide a modality (default behavior). It only carries a value when
-      // the caller explicitly opts into 'text' or 'image'.
-      expect(payload.requestedOperation.modality).toBe(expected)
-    }
-
-    it('echoes undefined when modality is omitted', async () => {
-      expectModality(await callRead({ type: 'full' }), undefined)
-    })
-
-    it('treats null / empty / whitespace-only modality as omitted', async () => {
-      expectModality(
-        await callRead({ type: 'full', modality: null }),
-        undefined,
-      )
-      expectModality(
-        await callRead({ type: 'full', modality: '   ' }),
-        undefined,
-      )
-    })
-
-    it('accepts modality case-insensitively and trims whitespace', async () => {
-      expectModality(
-        await callRead({ type: 'full', modality: 'IMAGE' }),
-        'image',
-      )
-      expectModality(
-        await callRead({ type: 'full', modality: '  Text  ' }),
-        'text',
-      )
-    })
-
-    it('rejects non-string modality values', async () => {
-      const result = await callRead({ type: 'full', modality: 123 })
-      expect(result.status).toBe(ToolCallResponseStatus.Error)
-      if (result.status === ToolCallResponseStatus.Error) {
-        expect(result.error).toMatch(/operation\.modality must be/)
-      }
-    })
-
-    it("rejects unknown modality strings (including legacy 'auto')", async () => {
-      // 'pdf' is intentionally NOT in this list — it's a valid value used by
-      // the PDF-capable schema branch.
-      for (const bad of ['video', 'auto', 'random-junk']) {
-        const result = await callRead({ type: 'full', modality: bad })
-        expect(result.status).toBe(ToolCallResponseStatus.Error)
-        if (result.status === ToolCallResponseStatus.Error) {
-          expect(result.error).toMatch(/operation\.modality must be/)
-        }
-      }
-    })
-
-    it('echoes modality back for non-PDF files even when image is requested', async () => {
-      // Non-PDF files ignore modality at the rendering layer (no image branch
-      // exists for .md), but the request payload still echoes what the model
-      // asked for, so silent no-ops remain observable.
-      expectModality(
-        await callRead({ type: 'full', modality: 'image' }),
-        'image',
-      )
-    })
-  })
-
-  it('defaults fs_search to hybrid and falls back to keyword with explicit reason', async () => {
-    const root = Object.assign(new TFolder(), { path: '' })
-    const file = Object.assign(new TFile(), {
-      path: 'note.md',
-      stat: { size: 20 },
-    })
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getRoot: jest.fn().mockReturnValue(root),
-          getFiles: jest.fn().mockReturnValue([file]),
-          getAllLoadedFiles: jest.fn().mockReturnValue([root]),
-          getMarkdownFiles: jest.fn().mockReturnValue([file]),
-        },
-      } as unknown as App,
-      toolName: 'fs_search',
-      args: {
-        scope: 'files',
-        query: 'note',
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-
-    expect(JSON.parse(result.text)).toEqual({
-      tool: 'fs_search',
-      requestedMode: 'hybrid',
-      effectiveMode: 'keyword',
-      fallbackReason: 'Semantic search is not available in this context.',
-      scope: 'files',
-      query: 'note',
-      path: '',
-      results: [{ kind: 'file', path: 'note.md', source: 'keyword' }],
-    })
-  })
-
-  it('keeps explicit rag strict when semantic search is unavailable', async () => {
-    const root = Object.assign(new TFolder(), { path: '' })
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getRoot: jest.fn().mockReturnValue(root),
-        },
-      } as unknown as App,
-      toolName: 'fs_search',
-      args: {
-        mode: 'rag',
-        query: 'note',
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Error)
-    if (result.status === ToolCallResponseStatus.Error) {
-      expect(result.error).toContain(
-        'Semantic search is not available in this context.',
-      )
-    }
-  })
-
-  it('matches keyword file search by whitespace-separated tokens instead of full query string', async () => {
-    const root = Object.assign(new TFolder(), { path: '' })
-    const files = [
-      Object.assign(new TFile(), {
-        path: '2.工作/3.工作流专项/1月/✅ 0109 Workflow 体系总览.md',
-        stat: { size: 20 },
-      }),
-      Object.assign(new TFile(), {
-        path: '2.工作/3.工作流专项/2月/✅ 0210 工作流复盘模块项目规划.md',
-        stat: { size: 20 },
-      }),
-      Object.assign(new TFile(), {
-        path: '2.工作/普通项目/普通笔记.md',
-        stat: { size: 20 },
-      }),
-    ]
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getRoot: jest.fn().mockReturnValue(root),
-          getFiles: jest.fn().mockReturnValue(files),
-          getAllLoadedFiles: jest.fn().mockReturnValue([root]),
-          getMarkdownFiles: jest.fn().mockReturnValue(files),
-        },
-      } as unknown as App,
-      toolName: 'fs_search',
-      args: {
-        mode: 'keyword',
-        scope: 'files',
-        query: 'workflow 工作流程 工作流',
-        maxResults: 10,
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-
-    expect(JSON.parse(result.text)).toEqual({
-      tool: 'fs_search',
-      requestedMode: 'keyword',
-      effectiveMode: 'keyword',
-      scope: 'files',
-      query: 'workflow 工作流程 工作流',
-      path: '',
-      results: [
-        {
-          kind: 'file',
-          path: '2.工作/3.工作流专项/1月/✅ 0109 Workflow 体系总览.md',
-          source: 'keyword',
-        },
-        {
-          kind: 'file',
-          path: '2.工作/3.工作流专项/2月/✅ 0210 工作流复盘模块项目规划.md',
-          source: 'keyword',
-        },
-      ],
-    })
-  })
-
-  it('ranks keyword content hits by matched token count before file path', async () => {
-    const root = Object.assign(new TFolder(), { path: '' })
-    const fileA = Object.assign(new TFile(), {
-      path: 'a.md',
-      stat: { size: 200 },
-    })
-    const fileB = Object.assign(new TFile(), {
-      path: 'b.md',
-      stat: { size: 200 },
-    })
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getRoot: jest.fn().mockReturnValue(root),
-          getFiles: jest.fn().mockReturnValue([fileA, fileB]),
-          getAllLoadedFiles: jest.fn().mockReturnValue([root]),
-          getMarkdownFiles: jest.fn().mockReturnValue([fileA, fileB]),
-          read: jest
-            .fn()
-            .mockImplementation(async (file: TFile) =>
-              file.path === 'a.md'
-                ? 'workflow 工作流 双命中'
-                : '只有 workflow 单命中',
-            ),
-        },
-      } as unknown as App,
-      toolName: 'fs_search',
-      args: {
-        mode: 'keyword',
-        scope: 'content',
-        query: 'workflow 工作流',
-        maxResults: 10,
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-
-    expect(JSON.parse(result.text)).toMatchObject({
-      results: [
-        {
-          kind: 'content_group',
-          path: 'a.md',
-          hitCount: 1,
-        },
-        {
-          kind: 'content_group',
-          path: 'b.md',
-          hitCount: 1,
-        },
-      ],
-    })
-  })
-
-  it('aggregates hybrid content hits by file and keeps top snippets', async () => {
-    const root = Object.assign(new TFolder(), { path: '' })
-    const fileA = Object.assign(new TFile(), {
-      path: 'workflow-a.md',
-      stat: { size: 200 },
-    })
-    const fileB = Object.assign(new TFile(), {
-      path: 'workflow-b.md',
-      stat: { size: 200 },
-    })
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getRoot: jest.fn().mockReturnValue(root),
-          getFiles: jest.fn().mockReturnValue([fileA, fileB]),
-          getAllLoadedFiles: jest.fn().mockReturnValue([root]),
-          getMarkdownFiles: jest.fn().mockReturnValue([fileA, fileB]),
-          read: jest
-            .fn()
-            .mockImplementation(async (file: TFile) =>
-              file.path === 'workflow-a.md'
-                ? 'workflow intro\nother line\nworkflow appendix'
-                : 'nothing relevant here',
-            ),
-        },
-      } as unknown as App,
-      settings: {
-        ragOptions: {
-          enabled: true,
-          limit: 10,
-        },
-        embeddingModelId: 'test-embedding',
-      } as unknown as YoloSettings,
-      getRagEngine: async () =>
-        ({
-          processQuery: jest.fn().mockResolvedValue([
-            {
-              path: 'workflow-a.md',
-              content: 'workflow intro chunk',
-              metadata: { startLine: 1, endLine: 2 },
-              similarity: 0.91,
-            },
-            {
-              path: 'workflow-b.md',
-              content: 'workflow b chunk',
-              metadata: { startLine: 3, endLine: 4 },
-              similarity: 0.89,
-            },
-            {
-              path: 'workflow-a.md',
-              content: 'workflow appendix chunk',
-              metadata: { startLine: 10, endLine: 12 },
-              similarity: 0.82,
-            },
-          ]),
-        }) as unknown as RAGEngine,
-      toolName: 'fs_search',
-      args: {
-        mode: 'hybrid',
-        query: 'workflow',
-        maxResults: 10,
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-
-    expect(JSON.parse(result.text)).toMatchObject({
-      tool: 'fs_search',
-      requestedMode: 'hybrid',
-      effectiveMode: 'hybrid',
-      scope: 'content',
-      query: 'workflow',
-      path: '',
-      results: [
-        {
-          kind: 'content_group',
-          path: 'workflow-a.md',
-          source: 'hybrid',
-          hitCount: 2,
-          snippets: [
-            { startLine: 1, endLine: 2 },
-            { startLine: 10, endLine: 12 },
-          ],
-        },
-        {
-          kind: 'content_group',
-          path: 'workflow-b.md',
-          source: 'hybrid',
-          hitCount: 1,
-          snippets: [{ startLine: 3, endLine: 4 }],
-        },
-      ],
     })
   })
 
@@ -2305,228 +1708,6 @@ describe('local fs tool action helpers', () => {
     })
   })
 
-  it('handles memory tools through local tool dispatcher', async () => {
-    const entries = new Map<string, unknown>()
-    const contents = new Map<string, string>()
-
-    const app = {
-      vault: {
-        getAbstractFileByPath: jest
-          .fn()
-          .mockImplementation((path: string) => entries.get(path) ?? null),
-        createFolder: jest.fn().mockImplementation(async (path: string) => {
-          const folder = Object.assign(new TFolder(), {
-            path,
-            children: [],
-          })
-          entries.set(path, folder)
-          return folder
-        }),
-        create: jest
-          .fn()
-          .mockImplementation(async (path: string, content: string) => {
-            const file = Object.assign(new TFile(), {
-              path,
-              stat: { size: content.length },
-            })
-            entries.set(path, file)
-            contents.set(path, content)
-            return file
-          }),
-        read: jest
-          .fn()
-          .mockImplementation(
-            async (file: TFile) => contents.get(file.path) ?? '',
-          ),
-        modify: jest
-          .fn()
-          .mockImplementation(async (file: TFile, content: string) => {
-            contents.set(file.path, content)
-            ;(file as { stat?: { size?: number } }).stat = {
-              size: content.length,
-            }
-          }),
-      },
-    } as unknown as App
-
-    const settings = {
-      yolo: { baseDir: 'YOLO' },
-      currentAssistantId: 'helper',
-      assistants: [
-        {
-          id: 'helper',
-          name: 'Helper Agent',
-          systemPrompt: 'You are helper.',
-        },
-      ],
-    } as never
-
-    const addResult = await callLocalFileTool({
-      app,
-      settings,
-      toolName: 'memory_add',
-      args: {
-        content: '用户希望回答保持简洁',
-        category: 'preferences',
-      },
-    })
-    expect(addResult.status).toBe('success')
-    const assistantMemoryPath = 'YOLO/memory/Helper Agent.md'
-    expect(contents.get(assistantMemoryPath) ?? '').toContain(
-      'Preference_1: 用户希望回答保持简洁',
-    )
-
-    const updateResult = await callLocalFileTool({
-      app,
-      settings,
-      toolName: 'memory_update',
-      args: {
-        id: 'Preference_1',
-        new_content: '用户希望回答保持简洁并直接',
-      },
-    })
-    expect(updateResult.status).toBe('success')
-
-    const deleteResult = await callLocalFileTool({
-      app,
-      settings,
-      toolName: 'memory_delete',
-      args: {
-        id: 'Preference_1',
-      },
-    })
-    expect(deleteResult.status).toBe('success')
-    expect(contents.get(assistantMemoryPath) ?? '').not.toContain(
-      'Preference_1',
-    )
-  })
-
-  it('supports partial-success batch add and delete for memory tools', async () => {
-    const entries = new Map<string, unknown>()
-    const contents = new Map<string, string>()
-
-    const app = {
-      vault: {
-        getAbstractFileByPath: jest
-          .fn()
-          .mockImplementation((path: string) => entries.get(path) ?? null),
-        createFolder: jest.fn().mockImplementation(async (path: string) => {
-          const folder = Object.assign(new TFolder(), {
-            path,
-            children: [],
-          })
-          entries.set(path, folder)
-          return folder
-        }),
-        create: jest
-          .fn()
-          .mockImplementation(async (path: string, content: string) => {
-            const file = Object.assign(new TFile(), {
-              path,
-              stat: { size: content.length },
-            })
-            entries.set(path, file)
-            contents.set(path, content)
-            return file
-          }),
-        read: jest
-          .fn()
-          .mockImplementation(
-            async (file: TFile) => contents.get(file.path) ?? '',
-          ),
-        modify: jest
-          .fn()
-          .mockImplementation(async (file: TFile, content: string) => {
-            contents.set(file.path, content)
-            ;(file as { stat?: { size?: number } }).stat = {
-              size: content.length,
-            }
-          }),
-      },
-    } as unknown as App
-
-    const settings = {
-      yolo: { baseDir: 'YOLO' },
-      currentAssistantId: 'helper',
-      assistants: [
-        {
-          id: 'helper',
-          name: 'Helper Agent',
-          systemPrompt: 'You are helper.',
-        },
-      ],
-    } as never
-
-    const batchAddResult = await callLocalFileTool({
-      app,
-      settings,
-      toolName: 'memory_add',
-      args: {
-        items: [
-          {
-            content: '批量记录 1',
-            category: 'other',
-          },
-          {
-            content: '   ',
-            category: 'other',
-          },
-          {
-            content: '批量记录 2',
-            category: 'other',
-          },
-        ],
-      },
-    })
-    expect(batchAddResult.status).toBe(ToolCallResponseStatus.Success)
-    if (batchAddResult.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-    const batchAddPayload = JSON.parse(batchAddResult.text) as {
-      mode: string
-      okCount: number
-      failCount: number
-      results: Array<{ ok: boolean; id?: string }>
-    }
-    expect(batchAddPayload.mode).toBe('batch')
-    expect(batchAddPayload.okCount).toBe(2)
-    expect(batchAddPayload.failCount).toBe(1)
-    const createdIds = batchAddPayload.results
-      .filter((result) => result.ok)
-      .map((result) => result.id)
-    expect(createdIds).toEqual(['Memory_1', 'Memory_2'])
-
-    const assistantMemoryPath = 'YOLO/memory/Helper Agent.md'
-
-    const batchDeleteResult = await callLocalFileTool({
-      app,
-      settings,
-      toolName: 'memory_delete',
-      args: {
-        ids: ['Memory_1', 'NotExist_404', 'Memory_2'],
-      },
-    })
-    expect(batchDeleteResult.status).toBe(ToolCallResponseStatus.Success)
-    if (batchDeleteResult.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-    const batchDeletePayload = JSON.parse(batchDeleteResult.text) as {
-      mode: string
-      okCount: number
-      failCount: number
-      results: Array<{ ok: boolean; id: string }>
-    }
-    expect(batchDeletePayload.mode).toBe('batch')
-    expect(batchDeletePayload.okCount).toBe(2)
-    expect(batchDeletePayload.failCount).toBe(1)
-    expect(
-      batchDeletePayload.results.filter((result) => !result.ok)[0]?.id,
-    ).toBe('NotExist_404')
-
-    expect(contents.get(assistantMemoryPath) ?? '').not.toContain('Memory_1')
-    expect(contents.get(assistantMemoryPath) ?? '').not.toContain('Memory_2')
-  })
-
   it('creates missing parent folders before creating a file', async () => {
     const entries = new Map<string, unknown>()
     const contents = new Map<string, string>()
@@ -2657,161 +1838,94 @@ describe('local fs tool action helpers', () => {
     }
   })
 
-  it('deletes a folder via fs_delete with recursive and reports targetKind', async () => {
-    const child = Object.assign(new TFile(), {
-      path: 'docs/a.md',
-      stat: { size: 1 },
-    })
-    const folder = Object.assign(new TFolder(), {
-      path: 'docs',
-      children: [child],
-    })
-    const trashFile = jest.fn()
+  // D4 of docs/plans/09-03-whiteboard-agent-tools/master.md (Q11): fs_edit /
+  // fs_write refuse `.yoloboard` unconditionally — no `resolveModuleFileTextRenderer`
+  // is even passed here, proving the block does not depend on the whiteboard
+  // module being installed or active.
+  it('rejects fs_write against a .yoloboard path, pointing at the whiteboard edit tool', async () => {
+    const create = jest.fn()
+    const modify = jest.fn()
 
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getAbstractFileByPath: jest.fn().mockReturnValue(folder),
-        },
-        fileManager: { trashFile },
-      } as unknown as App,
-      toolName: 'fs_delete',
-      args: {
-        path: 'docs',
-        recursive: true,
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    expect(trashFile).toHaveBeenCalledWith(folder)
-    if (result.status !== ToolCallResponseStatus.Success) {
-      throw new Error('expected success')
-    }
-    // Folder deletions carry no editSummary / chat-undo snapshot.
-    expect(result.metadata).toBeUndefined()
-    expect(JSON.parse(result.text)).toMatchObject({
-      tool: 'fs_delete',
-      action: 'delete',
-      results: [{ ok: true, target: 'docs', targetKind: 'folder' }],
-    })
-  })
-
-  it('refuses to delete a non-empty folder without recursive', async () => {
-    const child = Object.assign(new TFile(), {
-      path: 'docs/a.md',
-      stat: { size: 1 },
-    })
-    const folder = Object.assign(new TFolder(), {
-      path: 'docs',
-      children: [child],
-    })
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getAbstractFileByPath: jest.fn().mockReturnValue(folder),
-        },
-        fileManager: { trashFile: jest.fn() },
-      } as unknown as App,
-      toolName: 'fs_delete',
-      args: { path: 'docs' },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Error)
-    if (result.status === ToolCallResponseStatus.Error) {
-      expect(result.error).toMatch(/not empty/i)
-    }
-  })
-
-  it('returns Error when a single fs_move target fails', async () => {
     const result = await callLocalFileTool({
       app: {
         vault: {
           getAbstractFileByPath: jest.fn().mockReturnValue(null),
+          create,
+          modify,
           createFolder: jest.fn(),
         },
-        fileManager: { renameFile: jest.fn() },
       } as unknown as App,
-      toolName: 'fs_move',
+      toolName: 'fs_write',
       args: {
-        oldPath: 'docs/missing.md',
-        newPath: 'docs/missing-renamed.md',
+        path: 'Boards/Reading Notes.yoloboard',
+        content: '{"nodes":[]}',
       },
     })
 
     expect(result.status).toBe(ToolCallResponseStatus.Error)
     if (result.status === ToolCallResponseStatus.Error) {
-      expect(result.error).toBe('Source path not found: docs/missing.md')
+      expect(result.error).toMatch(/yolo_whiteboard__edit_board/)
     }
+    expect(create).not.toHaveBeenCalled()
+    expect(modify).not.toHaveBeenCalled()
   })
 
-  it('keeps fs write tool schemas flat without items or top-level combinators', () => {
+  it('rejects fs_edit against a .yoloboard path, pointing at the whiteboard edit tool', async () => {
+    const file = Object.assign(new TFile(), {
+      path: 'Boards/Reading Notes.yoloboard',
+      extension: 'yoloboard',
+      stat: { size: 100 },
+    })
+    const read = jest.fn().mockResolvedValue('{"nodes":[]}')
+    const modify = jest.fn()
+
+    const result = await callLocalFileTool({
+      app: {
+        vault: {
+          getAbstractFileByPath: jest.fn().mockReturnValue(file),
+          read,
+          modify,
+        },
+      } as unknown as App,
+      toolName: 'fs_edit',
+      args: {
+        path: 'Boards/Reading Notes.yoloboard',
+        oldText: 'nodes',
+        newText: 'cards',
+      },
+    })
+
+    expect(result.status).toBe(ToolCallResponseStatus.Error)
+    if (result.status === ToolCallResponseStatus.Error) {
+      expect(result.error).toMatch(/yolo_whiteboard__edit_board/)
+    }
+    // Rejected before ever reading the file to attempt the edit.
+    expect(read).not.toHaveBeenCalled()
+    expect(modify).not.toHaveBeenCalled()
+  })
+
+  it('keeps the fs_write tool schema flat without items or top-level combinators', () => {
     const tools = getLocalFileTools()
     const schemaByName = new Map(
       tools.map((tool) => [tool.name, tool.inputSchema] as const),
     )
 
-    const expectedRequired: Record<string, string[]> = {
-      fs_write: ['path', 'content'],
-      fs_delete: ['path'],
-      fs_create_dir: ['path'],
-      fs_move: ['oldPath', 'newPath'],
-    }
+    const schema = schemaByName.get('fs_write') as
+      | {
+          properties?: Record<string, unknown>
+          required?: string[]
+          oneOf?: unknown
+          anyOf?: unknown
+          allOf?: unknown
+        }
+      | undefined
 
-    for (const [toolName, required] of Object.entries(expectedRequired)) {
-      const schema = schemaByName.get(toolName) as
-        | {
-            properties?: Record<string, unknown>
-            required?: string[]
-            oneOf?: unknown
-            anyOf?: unknown
-            allOf?: unknown
-          }
-        | undefined
-
-      expect(schema).toBeDefined()
-      expect(schema?.properties?.items).toBeUndefined()
-      expect(schema?.required).toEqual(required)
-      expect(schema?.oneOf).toBeUndefined()
-      expect(schema?.anyOf).toBeUndefined()
-      expect(schema?.allOf).toBeUndefined()
-    }
-  })
-
-  it('creates missing parent folders before creating a directory', async () => {
-    const entries = new Map<string, unknown>()
-    const createFolder = jest.fn().mockImplementation(async (path: string) => {
-      const folder = Object.assign(new TFolder(), {
-        path,
-        children: [],
-      })
-      entries.set(path, folder)
-      return folder
-    })
-
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getAbstractFileByPath: jest
-            .fn()
-            .mockImplementation((path: string) => entries.get(path) ?? null),
-          createFolder,
-        },
-      } as unknown as App,
-      toolName: 'fs_create_dir',
-      args: {
-        path: '99-Assets/YOLO/skills/content-organization',
-      },
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    expect(createFolder).toHaveBeenNthCalledWith(1, '99-Assets')
-    expect(createFolder).toHaveBeenNthCalledWith(2, '99-Assets/YOLO')
-    expect(createFolder).toHaveBeenNthCalledWith(3, '99-Assets/YOLO/skills')
-    expect(createFolder).toHaveBeenNthCalledWith(
-      4,
-      '99-Assets/YOLO/skills/content-organization',
-    )
+    expect(schema).toBeDefined()
+    expect(schema?.properties?.items).toBeUndefined()
+    expect(schema?.required).toEqual(['path', 'content'])
+    expect(schema?.oneOf).toBeUndefined()
+    expect(schema?.anyOf).toBeUndefined()
+    expect(schema?.allOf).toBeUndefined()
   })
 
   describe('workspace scope final defense', () => {
@@ -2938,6 +2052,1034 @@ describe('local fs tool action helpers', () => {
   })
 })
 
+describe('YOLO user data root final defense', () => {
+  const settings = { yolo: { baseDir: 'YOLO' } } as unknown as YoloSettings
+
+  it('keeps the not-found disguise when the path is also outside the workspace scope', async () => {
+    const create = jest.fn()
+    const result = await callLocalFileTool({
+      app: {
+        vault: {
+          getAbstractFileByPath: jest.fn().mockReturnValue(null),
+          create,
+          createFolder: jest.fn(),
+        },
+      } as unknown as App,
+      settings,
+      toolName: 'fs_write',
+      args: { path: 'YOLO/data/chats/v1_new.json', content: 'leak' },
+      workspaceScope: { enabled: true, include: ['Notes'], exclude: [] },
+    })
+
+    // Hidden wins over scope: a scope-violation message would confirm the
+    // path as a real, merely-restricted location — exactly what hiding the
+    // user-data root is meant to prevent.
+    expect(result.status).toBe(ToolCallResponseStatus.Error)
+    if (result.status !== ToolCallResponseStatus.Error) {
+      throw new Error('expected error')
+    }
+    expect(result.error).toBe('File not found: YOLO/data/chats/v1_new.json')
+    expect(result.error).not.toMatch(/workspace scope/i)
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('reports fs_write to the user data root as not found instead of writing', async () => {
+    const create = jest.fn()
+    const result = await callLocalFileTool({
+      app: {
+        vault: {
+          getAbstractFileByPath: jest.fn().mockReturnValue(null),
+          create,
+          createFolder: jest.fn(),
+        },
+      } as unknown as App,
+      settings,
+      toolName: 'fs_write',
+      args: {
+        path: 'YOLO/data/chats/v1_new.json',
+        content: 'leak',
+      },
+    })
+
+    expect(result.status).toBe(ToolCallResponseStatus.Error)
+    if (result.status === ToolCallResponseStatus.Error) {
+      expect(result.error).toBe('File not found: YOLO/data/chats/v1_new.json')
+      expect(result.error).not.toMatch(/hidden|excluded|internal/i)
+    }
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('reports fs_edit on the user data root as not found instead of editing', async () => {
+    const modify = jest.fn()
+    const existingChatFile = Object.assign(new TFile(), {
+      path: 'YOLO/data/chats/v1_abc.json',
+      stat: { size: 20 },
+    })
+    const result = await callLocalFileTool({
+      app: {
+        vault: {
+          getAbstractFileByPath: jest.fn().mockReturnValue(existingChatFile),
+          read: jest.fn().mockResolvedValue('{"title":"other conversation"}'),
+          modify,
+        },
+      } as unknown as App,
+      settings,
+      toolName: 'fs_edit',
+      args: {
+        path: 'YOLO/data/chats/v1_abc.json',
+        oldText: 'other',
+        newText: 'tampered',
+      },
+    })
+
+    expect(result.status).toBe(ToolCallResponseStatus.Error)
+    if (result.status === ToolCallResponseStatus.Error) {
+      expect(result.error).toBe('File not found: YOLO/data/chats/v1_abc.json')
+    }
+    expect(modify).not.toHaveBeenCalled()
+  })
+
+  it('reports fs_read on the user data root as not found without reading its content', async () => {
+    const read = jest.fn().mockResolvedValue('{"title":"other conversation"}')
+    const chatFile = Object.assign(new TFile(), {
+      path: 'YOLO/data/chats/v1_abc.json',
+      extension: 'json',
+      stat: { size: 20 },
+    })
+    const result = await callLocalFileTool({
+      app: {
+        vault: {
+          getFileByPath: jest
+            .fn()
+            .mockImplementation((path: string) =>
+              path === 'YOLO/data/chats/v1_abc.json' ? chatFile : null,
+            ),
+          read,
+        },
+        metadataCache: {
+          getFirstLinkpathDest: jest.fn().mockReturnValue(null),
+        },
+      } as unknown as App,
+      settings,
+      toolName: 'fs_read',
+      args: { paths: ['YOLO/data/chats/v1_abc.json'] },
+    })
+
+    expect(result.status).toBe(ToolCallResponseStatus.Success)
+    if (result.status !== ToolCallResponseStatus.Success) {
+      throw new Error('expected success')
+    }
+    const payload = JSON.parse(result.text) as {
+      results: Array<{ path: string; ok: boolean; error?: string }>
+    }
+    expect(payload.results).toEqual([
+      {
+        path: 'YOLO/data/chats/v1_abc.json',
+        ok: false,
+        error: 'File not found: YOLO/data/chats/v1_abc.json',
+      },
+    ])
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  it('reports fs_read on a wikilink resolved into the user data root as not found', async () => {
+    const read = jest.fn().mockResolvedValue('{"title":"other conversation"}')
+    const chatFile = Object.assign(new TFile(), {
+      path: 'YOLO/data/chats/v1_abc.json',
+      extension: 'json',
+      stat: { size: 20 },
+    })
+    const result = await callLocalFileTool({
+      app: {
+        vault: {
+          getFileByPath: jest.fn().mockReturnValue(null),
+          read,
+        },
+        metadataCache: {
+          getFirstLinkpathDest: jest
+            .fn()
+            .mockImplementation((linkpath: string) =>
+              linkpath === 'v1_abc' ? chatFile : null,
+            ),
+          getFileCache: jest.fn().mockReturnValue(null),
+        },
+      } as unknown as App,
+      settings,
+      toolName: 'fs_read',
+      args: { paths: ['[[v1_abc]]'] },
+    })
+
+    expect(result.status).toBe(ToolCallResponseStatus.Success)
+    if (result.status !== ToolCallResponseStatus.Success) {
+      throw new Error('expected success')
+    }
+    const payload = JSON.parse(result.text) as {
+      results: Array<{ path: string; ok: boolean; error?: string }>
+    }
+    expect(payload.results).toEqual([
+      {
+        path: '[[v1_abc]]',
+        ok: false,
+        error: 'File not found: [[v1_abc]]',
+      },
+    ])
+    expect(read).not.toHaveBeenCalled()
+  })
+})
+
+describe('callLocalFileTool: dispatcher-level boundaries (D5 parity with executeBuiltinTool)', () => {
+  it('returns Aborted without touching the vault when signal is already aborted', async () => {
+    const getAbstractFileByPath = jest.fn()
+    const controller = new AbortController()
+    controller.abort()
+
+    const result = await callLocalFileTool({
+      app: {
+        vault: { getAbstractFileByPath },
+      } as unknown as App,
+      toolName: 'fs_edit',
+      args: { path: 'note.md', oldText: 'x', newText: 'y' },
+      signal: controller.signal,
+    })
+
+    expect(result).toEqual({ status: ToolCallResponseStatus.Aborted })
+    expect(getAbstractFileByPath).not.toHaveBeenCalled()
+  })
+
+  it('returns an explicit error for an unknown tool name instead of throwing', async () => {
+    const result = await callLocalFileTool({
+      app: { vault: {} } as unknown as App,
+      toolName: 'not_a_real_tool',
+      args: {},
+    })
+
+    expect(result).toEqual({
+      status: ToolCallResponseStatus.Error,
+      error: 'Unknown local file tool: not_a_real_tool',
+    })
+  })
+})
+
+describe('fs_read wikilink resolution', () => {
+  const makeMdFile = (path: string, size = 20, mtime = 1000): TFile =>
+    Object.assign(new TFile(), {
+      path,
+      name: path.split('/').pop(),
+      extension: 'md',
+      stat: { size, mtime },
+    })
+
+  type FakeHeading = { heading: string; level: number; line0: number }
+
+  const makeReadApp = (options: {
+    content: Record<string, string>
+    resolver: (linkpath: string, sourcePath: string) => TFile | null
+    headingsByFile?: Map<TFile, FakeHeading[]>
+  }): App => {
+    const { content, resolver, headingsByFile } = options
+    return {
+      vault: {
+        getFileByPath: jest.fn().mockReturnValue(null),
+        read: jest
+          .fn()
+          .mockImplementation((file: TFile) =>
+            Promise.resolve(content[file.path] ?? ''),
+          ),
+      },
+      metadataCache: {
+        getFirstLinkpathDest: jest.fn(resolver),
+        getFileCache: jest.fn().mockImplementation((file: TFile) => {
+          const headings = headingsByFile?.get(file)
+          if (!headings) return null
+          return {
+            headings: headings.map((h) => ({
+              heading: h.heading,
+              level: h.level,
+              position: {
+                start: { line: h.line0, col: 0, offset: 0 },
+                end: { line: h.line0, col: 0, offset: 0 },
+              },
+            })),
+          }
+        }),
+      },
+    } as unknown as App
+  }
+
+  const parseSuccessResults = (result: {
+    status: ToolCallResponseStatus
+    text?: string
+  }): Array<Record<string, unknown>> => {
+    expect(result.status).toBe(ToolCallResponseStatus.Success)
+    return (
+      JSON.parse((result as { text: string }).text) as {
+        results: Array<Record<string, unknown>>
+      }
+    ).results
+  }
+
+  it('resolves a [[...]]-style path entry that has no exact vault match', async () => {
+    const file = makeMdFile('Notes/Foo.md')
+    const app = makeReadApp({
+      content: { 'Notes/Foo.md': 'line1\nline2\nline3' },
+      resolver: (linkpath) => (linkpath === 'Foo' ? file : null),
+    })
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['[[Foo]]'] },
+    })
+
+    const results = parseSuccessResults(result)
+    expect(results).toEqual([
+      expect.objectContaining({
+        path: '[[Foo]]',
+        ok: true,
+        resolvedPath: 'Notes/Foo.md',
+        content: '1|line1\n2|line2\n3|line3',
+      }),
+    ])
+  })
+
+  it('leaves exact vault-path matches unaffected (no resolvedPath)', async () => {
+    const file = makeMdFile('Notes/Foo.md')
+    const app: App = {
+      vault: {
+        getFileByPath: jest
+          .fn()
+          .mockImplementation((path: string) =>
+            path === 'Notes/Foo.md' ? file : null,
+          ),
+        read: jest.fn().mockResolvedValue('hello'),
+      },
+      metadataCache: {
+        getFirstLinkpathDest: jest.fn().mockReturnValue(null),
+        getFileCache: jest.fn().mockReturnValue(null),
+      },
+    } as unknown as App
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['Notes/Foo.md'] },
+    })
+
+    const results = parseSuccessResults(result)
+    expect(results[0]).toEqual(
+      expect.objectContaining({ path: 'Notes/Foo.md', ok: true }),
+    )
+    expect(results[0]?.resolvedPath).toBeUndefined()
+  })
+
+  it('applies a resolved heading subpath as the effective range on a full read', async () => {
+    const file = makeMdFile('Notes/Foo.md')
+    const app = makeReadApp({
+      content: {
+        'Notes/Foo.md':
+          'Intro\nSection A\nBody A\nSub A.1\nBody A.1\nSection B\nBody B',
+      },
+      resolver: (linkpath) => (linkpath === 'Foo' ? file : null),
+      headingsByFile: new Map([
+        [
+          file,
+          [
+            { heading: 'Section A', level: 1, line0: 1 },
+            { heading: 'Sub A.1', level: 2, line0: 3 },
+            { heading: 'Section B', level: 1, line0: 5 },
+          ],
+        ],
+      ]),
+    })
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['[[Foo#Section A]]'] },
+    })
+
+    const results = parseSuccessResults(result)
+    expect(results[0]).toEqual(
+      expect.objectContaining({
+        path: '[[Foo#Section A]]',
+        ok: true,
+        resolvedPath: 'Notes/Foo.md',
+        resolvedSubpath: { type: 'heading', startLine: 2, endLine: 5 },
+        returnedRange: { startLine: 2, endLine: 5 },
+        // 1-based lines 2-5: "Section A", "Body A", "Sub A.1", "Body A.1" —
+        // stops before "Section B" (same level as "Section A").
+        content: '2|Section A\n3|Body A\n4|Sub A.1\n5|Body A.1',
+      }),
+    )
+  })
+
+  it('lets an explicit startLine/endLine override the resolved subpath range', async () => {
+    const file = makeMdFile('Notes/Foo.md')
+    const app = makeReadApp({
+      content: {
+        'Notes/Foo.md': 'Intro\nSection A\nBody A\nSection B\nBody B',
+      },
+      resolver: (linkpath) => (linkpath === 'Foo' ? file : null),
+      headingsByFile: new Map([
+        [
+          file,
+          [
+            { heading: 'Section A', level: 1, line0: 1 },
+            { heading: 'Section B', level: 1, line0: 3 },
+          ],
+        ],
+      ]),
+    })
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['[[Foo#Section A]]'], startLine: 1, endLine: 1 },
+    })
+
+    const results = parseSuccessResults(result)
+    expect(results[0]).toEqual(
+      expect.objectContaining({
+        ok: true,
+        // Section A (1-based line 2) runs through Body A (line 3), stopping
+        // before Section B (line 4) — but the explicit startLine/endLine
+        // below overrides this for the actual returned range.
+        resolvedSubpath: { type: 'heading', startLine: 2, endLine: 3 },
+        returnedRange: { startLine: 1, endLine: 1 },
+        content: '1|Intro',
+      }),
+    )
+  })
+
+  it('falls back to a full read with a warning when the subpath is not found', async () => {
+    const file = makeMdFile('Notes/Foo.md')
+    const app = makeReadApp({
+      content: { 'Notes/Foo.md': 'line1\nline2' },
+      resolver: (linkpath) => (linkpath === 'Foo' ? file : null),
+      headingsByFile: new Map([[file, []]]),
+    })
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['[[Foo#Missing]]'] },
+    })
+
+    const results = parseSuccessResults(result)
+    expect(results[0]).toEqual(
+      expect.objectContaining({
+        ok: true,
+        resolvedPath: 'Notes/Foo.md',
+        content: '1|line1\n2|line2',
+      }),
+    )
+    expect(results[0]?.resolvedSubpath).toBeUndefined()
+    expect(results[0]?.warning).toMatch(/Missing/)
+  })
+
+  it('reports an actionable error when the wikilink target cannot be resolved', async () => {
+    const app = makeReadApp({
+      content: {},
+      resolver: () => null,
+    })
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['[[Missing]]'] },
+    })
+
+    const results = parseSuccessResults(result)
+    expect(results[0]).toEqual({
+      path: '[[Missing]]',
+      ok: false,
+      error:
+        'File not found. "[[Missing]]" did not match a vault path or a resolvable wikilink target.',
+    })
+  })
+
+  it('rejects a wikilink target that resolves outside the workspace scope, without leaking the resolved path (issue #577)', async () => {
+    const file = makeMdFile('Private/Secret.md')
+    const app = makeReadApp({
+      content: { 'Private/Secret.md': 'shh' },
+      resolver: (linkpath) => (linkpath === 'Secret' ? file : null),
+    })
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['[[Secret]]'] },
+      workspaceScope: { enabled: true, include: ['Notes'], exclude: [] },
+    })
+
+    const results = parseSuccessResults(result)
+    // The error must echo the agent's own unresolved input ("[[Secret]]"),
+    // never the real vault path ("Private/Secret.md") it resolved to — an
+    // agent scoped away from Private/ has no way to know a wikilink lands
+    // there, and the denial message must not be how it finds out.
+    expect(results[0]).toEqual({
+      path: '[[Secret]]',
+      ok: false,
+      error: 'Path "[[Secret]]" is outside this agent\'s workspace scope.',
+    })
+    const resultText = JSON.stringify(results[0])
+    expect(resultText).not.toContain('Private/Secret.md')
+  })
+
+  it('allows a wikilink target that resolves inside the workspace scope', async () => {
+    const file = makeMdFile('Notes/Foo.md')
+    const app = makeReadApp({
+      content: { 'Notes/Foo.md': 'in scope' },
+      resolver: (linkpath) => (linkpath === 'Foo' ? file : null),
+    })
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['[[Foo]]'] },
+      workspaceScope: { enabled: true, include: ['Notes'], exclude: [] },
+    })
+
+    const results = parseSuccessResults(result)
+    expect(results[0]).toEqual(
+      expect.objectContaining({ ok: true, resolvedPath: 'Notes/Foo.md' }),
+    )
+  })
+
+  it('still enforces workspace scope for an exact-match fs_read path (no gateway-level pre-check anymore)', async () => {
+    const file = makeMdFile('Private/Secret.md')
+    const app: App = {
+      vault: {
+        getFileByPath: jest
+          .fn()
+          .mockImplementation((path: string) =>
+            path === 'Private/Secret.md' ? file : null,
+          ),
+        read: jest.fn().mockResolvedValue('shh'),
+      },
+      metadataCache: {
+        getFirstLinkpathDest: jest.fn().mockReturnValue(null),
+        getFileCache: jest.fn().mockReturnValue(null),
+      },
+    } as unknown as App
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['Private/Secret.md'] },
+      workspaceScope: { enabled: true, include: ['Notes'], exclude: [] },
+    })
+
+    const results = parseSuccessResults(result)
+    expect(results[0]).toEqual({
+      path: 'Private/Secret.md',
+      ok: false,
+      error:
+        'Path "Private/Secret.md" is outside this agent\'s workspace scope.',
+    })
+  })
+
+  it('keeps the skill package exemption for out-of-scope files inside an allowed skill directory', async () => {
+    const file = makeMdFile('Skills/pkg/reference.md')
+    const app: App = {
+      vault: {
+        getFileByPath: jest
+          .fn()
+          .mockImplementation((path: string) =>
+            path === 'Skills/pkg/reference.md' ? file : null,
+          ),
+        read: jest.fn().mockResolvedValue('skill reference content'),
+      },
+      metadataCache: {
+        getFirstLinkpathDest: jest.fn().mockReturnValue(null),
+        getFileCache: jest.fn().mockReturnValue(null),
+      },
+    } as unknown as App
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['Skills/pkg/reference.md'] },
+      workspaceScope: { enabled: true, include: ['Notes'], exclude: [] },
+      allowedSkillPaths: ['Skills/pkg/SKILL.md'],
+    })
+
+    const results = parseSuccessResults(result)
+    expect(results[0]).toEqual(
+      expect.objectContaining({ path: 'Skills/pkg/reference.md', ok: true }),
+    )
+  })
+})
+
+// D3 of docs/plans/09-03-whiteboard-agent-tools/master.md: fs_read dispatches
+// a claimed extension to the module's renderer instead of returning raw
+// bytes. `resolveModuleFileTextRenderer` is threaded straight through
+// `ToolContext`, so these tests pass it as a plain function the way
+// `mcpManager.ts` would populate it from `ModuleFileTextRendererRegistry`.
+describe('fs_read module file text renderer dispatch (D3)', () => {
+  const makeFile = (path: string, extension: string, size = 100): TFile =>
+    Object.assign(new TFile(), {
+      path,
+      name: path.split('/').pop(),
+      extension,
+      stat: { size, mtime: 1000 },
+    })
+
+  const makeApp = (options: {
+    files: Record<string, TFile>
+    content: Record<string, string>
+  }): App => {
+    const { files, content } = options
+    return {
+      vault: {
+        getFileByPath: jest
+          .fn()
+          .mockImplementation((path: string) => files[path] ?? null),
+        read: jest
+          .fn()
+          .mockImplementation((file: TFile) =>
+            Promise.resolve(content[file.path] ?? ''),
+          ),
+      },
+      metadataCache: {
+        getFirstLinkpathDest: jest.fn().mockReturnValue(null),
+        getFileCache: jest.fn().mockReturnValue(null),
+      },
+    } as unknown as App
+  }
+
+  const parseResults = (result: {
+    status: ToolCallResponseStatus
+    text?: string
+  }): Array<Record<string, unknown>> => {
+    expect(result.status).toBe(ToolCallResponseStatus.Success)
+    return (
+      JSON.parse((result as { text: string }).text) as {
+        results: Array<Record<string, unknown>>
+      }
+    ).results
+  }
+
+  it('renders a claimed extension through the module renderer instead of returning raw content', async () => {
+    const file = makeFile('Board.yoloboard', 'yoloboard')
+    const app = makeApp({
+      files: { 'Board.yoloboard': file },
+      content: { 'Board.yoloboard': '{"nodes":[]}' },
+    })
+    const render = jest.fn().mockResolvedValue('37 cards, 12 edges')
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['Board.yoloboard'] },
+      resolveModuleFileTextRenderer: (extension) =>
+        extension === 'yoloboard'
+          ? { extensions: ['yoloboard'], render }
+          : null,
+    })
+
+    expect(render).toHaveBeenCalledWith({
+      path: 'Board.yoloboard',
+      content: '{"nodes":[]}',
+    })
+    const results = parseResults(result)
+    expect(results).toEqual([
+      expect.objectContaining({
+        path: 'Board.yoloboard',
+        ok: true,
+        content: '1|37 cards, 12 edges',
+      }),
+    ])
+  })
+
+  it('reads raw content unchanged when nothing claims the extension', async () => {
+    const file = makeFile('Board.yoloboard', 'yoloboard')
+    const app = makeApp({
+      files: { 'Board.yoloboard': file },
+      content: { 'Board.yoloboard': '{"nodes":[]}' },
+    })
+    const render = jest.fn()
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['Board.yoloboard'] },
+      // Registered for a different extension only — the module is either
+      // not installed/active, or never claimed `.yoloboard`.
+      resolveModuleFileTextRenderer: (extension) =>
+        extension === 'somethingelse'
+          ? { extensions: ['somethingelse'], render }
+          : null,
+    })
+
+    expect(render).not.toHaveBeenCalled()
+    const results = parseResults(result)
+    expect(results).toEqual([
+      expect.objectContaining({
+        path: 'Board.yoloboard',
+        ok: true,
+        content: '1|{"nodes":[]}',
+      }),
+    ])
+  })
+
+  it('reads raw content unchanged when resolveModuleFileTextRenderer is not wired up at all', async () => {
+    const file = makeFile('Board.yoloboard', 'yoloboard')
+    const app = makeApp({
+      files: { 'Board.yoloboard': file },
+      content: { 'Board.yoloboard': '{"nodes":[]}' },
+    })
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['Board.yoloboard'] },
+    })
+
+    const results = parseResults(result)
+    expect(results).toEqual([
+      expect.objectContaining({
+        path: 'Board.yoloboard',
+        ok: true,
+        content: '1|{"nodes":[]}',
+      }),
+    ])
+  })
+
+  it('returns a clear tool error, not raw JSON, when the renderer throws', async () => {
+    const file = makeFile('Board.yoloboard', 'yoloboard')
+    const app = makeApp({
+      files: { 'Board.yoloboard': file },
+      content: { 'Board.yoloboard': '{"nodes":[]}' },
+    })
+    const render = jest.fn().mockRejectedValue(new Error('board is corrupt'))
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['Board.yoloboard'] },
+      resolveModuleFileTextRenderer: (extension) =>
+        extension === 'yoloboard'
+          ? { extensions: ['yoloboard'], render }
+          : null,
+    })
+
+    const results = parseResults(result)
+    expect(results).toEqual([
+      expect.objectContaining({
+        path: 'Board.yoloboard',
+        ok: false,
+        error: expect.stringContaining('board is corrupt'),
+      }),
+    ])
+    // Model-facing error explains *why* — not a raw JSON dump of the file.
+    expect((results[0].error as string).includes('{"nodes"')).toBe(false)
+  })
+
+  it('rejects an oversized raw file before ever calling the renderer', async () => {
+    // MODULE_RENDERED_FILE_SOURCE_MAX_BYTES (20 MiB) is far above the
+    // MAX_FILE_SIZE_BYTES (2 MiB) an unclaimed text file would be capped at —
+    // this is the "size ordering is reversed for a claimed extension" case
+    // from master.md D3: a huge raw board must still be readable so it can
+    // be rendered down to a small summary.
+    const oversized = 21 * 1024 * 1024
+    const file = makeFile('Board.yoloboard', 'yoloboard', oversized)
+    const app = makeApp({
+      files: { 'Board.yoloboard': file },
+      content: {},
+    })
+    const render = jest.fn()
+
+    const result = await callLocalFileTool({
+      app,
+      toolName: 'fs_read',
+      args: { paths: ['Board.yoloboard'] },
+      resolveModuleFileTextRenderer: (extension) =>
+        extension === 'yoloboard'
+          ? { extensions: ['yoloboard'], render }
+          : null,
+    })
+
+    expect(render).not.toHaveBeenCalled()
+    const results = parseResults(result)
+    expect(results).toEqual([
+      expect.objectContaining({ path: 'Board.yoloboard', ok: false }),
+    ])
+  })
+})
+
+describe('bash tool dispatch', () => {
+  const mockApp = { vault: {}, fileManager: {} } as unknown as App
+
+  const mockBashEngine = (
+    execImpl: (
+      command: string,
+      confirm: (
+        kind: 'rm' | 'mv',
+        targets: readonly string[],
+      ) => Promise<boolean>,
+    ) => Promise<{ stdout: string; stderr: string; exitCode: number }>,
+  ) => {
+    let capturedConfirm:
+      | ((kind: 'rm' | 'mv', targets: readonly string[]) => Promise<boolean>)
+      | undefined
+    const dispose = jest.fn()
+    const release = jest.fn()
+    setRuntimeComponentAcquirerForTests(
+      async <I extends RuntimeComponentId>(
+        id: I,
+      ): Promise<RuntimeComponentLease<I>> => {
+        if (id !== 'bash-engine') throw new Error('Unexpected component')
+        const api = {
+          createSession: jest.fn().mockImplementation((options) => {
+            capturedConfirm = options.confirmDangerousOperation
+            return {
+              exec: (command: string) =>
+                execImpl(command, options.confirmDangerousOperation),
+              dispose,
+            }
+          }),
+          dispose: async () => undefined,
+        }
+        return { api, release } as unknown as RuntimeComponentLease<I>
+      },
+    )
+    return {
+      release,
+      dispose,
+      getCapturedConfirm: () => capturedConfirm,
+    }
+  }
+
+  it('runs a command and returns stdout/stderr/exit_code as JSON', async () => {
+    const { release } = mockBashEngine(async (command) => {
+      expect(command).toBe('ls')
+      return { stdout: 'a.md\nb.md\n', stderr: '', exitCode: 0 }
+    })
+
+    const result = await callLocalFileTool({
+      app: mockApp,
+      toolName: 'bash',
+      args: { command: 'ls' },
+      toolCallId: 'call-1',
+    })
+
+    expect(result.status).toBe(ToolCallResponseStatus.Success)
+    if (result.status !== ToolCallResponseStatus.Success) {
+      throw new Error('expected success')
+    }
+    expect(JSON.parse(result.text)).toEqual({
+      tool: 'bash',
+      exit_code: 0,
+      stdout: 'a.md\nb.md\n',
+      stderr: '',
+    })
+    expect(release).toHaveBeenCalledTimes(1)
+  })
+
+  it('never pauses for confirmation under full_access', async () => {
+    mockBashEngine(async (command, confirm) => {
+      const approved = await confirm('rm', ['/vault/a.md'])
+      expect(approved).toBe(true)
+      return { stdout: '', stderr: '', exitCode: 0 }
+    })
+
+    const result = await callLocalFileTool({
+      app: mockApp,
+      toolName: 'bash',
+      args: { command: 'rm a.md' },
+      toolCallId: 'call-2',
+      bashApprovalMode: 'full_access',
+    })
+
+    expect(result.status).toBe(ToolCallResponseStatus.Success)
+    // No pending dangerous approval should ever have been raised.
+    expect(getPendingDangerousBashApproval('call-2')).toBeNull()
+  })
+
+  it('never pauses for confirmation under require_approval (the whole call was already gated)', async () => {
+    mockBashEngine(async (command, confirm) => {
+      const approved = await confirm('mv', ['/vault/a.md -> /vault/b.md'])
+      expect(approved).toBe(true)
+      return { stdout: '', stderr: '', exitCode: 0 }
+    })
+
+    const result = await callLocalFileTool({
+      app: mockApp,
+      toolName: 'bash',
+      args: { command: 'mv a.md b.md' },
+      toolCallId: 'call-3',
+      bashApprovalMode: 'require_approval',
+    })
+
+    expect(result.status).toBe(ToolCallResponseStatus.Success)
+    expect(getPendingDangerousBashApproval('call-3')).toBeNull()
+  })
+
+  it('pauses mid-script for rm/mv under dangerous_only and resumes once resolved', async () => {
+    const { getCapturedConfirm } = mockBashEngine(async (command, confirm) => {
+      const approved = await confirm('rm', ['/vault/a.md'])
+      return {
+        stdout: approved ? 'removed' : '',
+        stderr: approved ? '' : 'operation denied by user',
+        exitCode: approved ? 0 : 1,
+      }
+    })
+
+    const resultPromise = callLocalFileTool({
+      app: mockApp,
+      toolName: 'bash',
+      args: { command: 'rm a.md' },
+      toolCallId: 'call-4',
+      bashApprovalMode: 'dangerous_only',
+    })
+
+    // Give the dispatch a tick to reach the confirm() call and register the
+    // pending request.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const pending = getPendingDangerousBashApproval('call-4')
+    expect(pending).toMatchObject({ kind: 'rm', targets: ['/vault/a.md'] })
+    expect(getCapturedConfirm()).toBeDefined()
+
+    resolveDangerousBashApproval('call-4', pending!.requestId, true)
+
+    const result = await resultPromise
+    expect(result.status).toBe(ToolCallResponseStatus.Success)
+    if (result.status !== ToolCallResponseStatus.Success) {
+      throw new Error('expected success')
+    }
+    expect(JSON.parse(result.text)).toMatchObject({
+      exit_code: 0,
+      stdout: 'removed',
+    })
+  })
+
+  it('denying a dangerous operation returns a nonzero exit code without failing the tool call', async () => {
+    mockBashEngine(async (command, confirm) => {
+      const approved = await confirm('rm', ['/vault/a.md'])
+      return {
+        stdout: '',
+        stderr: approved ? '' : 'operation denied by user',
+        exitCode: approved ? 0 : 1,
+      }
+    })
+
+    const resultPromise = callLocalFileTool({
+      app: mockApp,
+      toolName: 'bash',
+      args: { command: 'rm a.md' },
+      toolCallId: 'call-5',
+      bashApprovalMode: 'dangerous_only',
+    })
+
+    await Promise.resolve()
+    await Promise.resolve()
+    const pending = getPendingDangerousBashApproval('call-5')
+    resolveDangerousBashApproval('call-5', pending!.requestId, false)
+
+    const result = await resultPromise
+    expect(result.status).toBe(ToolCallResponseStatus.Success)
+    if (result.status !== ToolCallResponseStatus.Success) {
+      throw new Error('expected success')
+    }
+    const payload = JSON.parse(result.text) as {
+      exit_code: number
+      stderr: string
+    }
+    expect(payload.exit_code).toBe(1)
+    expect(payload.stderr).toContain('operation denied by user')
+  })
+
+  it('fails closed (denies) when there is no toolCallId to attach an approval card to', async () => {
+    mockBashEngine(async (command, confirm) => {
+      const approved = await confirm('rm', ['/vault/a.md'])
+      expect(approved).toBe(false)
+      return { stdout: '', stderr: '', exitCode: approved ? 0 : 1 }
+    })
+
+    const result = await callLocalFileTool({
+      app: mockApp,
+      toolName: 'bash',
+      args: { command: 'rm a.md' },
+      bashApprovalMode: 'dangerous_only',
+      // toolCallId intentionally omitted.
+    })
+
+    expect(result.status).toBe(ToolCallResponseStatus.Success)
+  })
+
+  it('passes readOnly through to the bash-engine session when bashReadOnly is set', async () => {
+    let createSessionOptions: { readOnly?: boolean } | undefined
+    setRuntimeComponentAcquirerForTests(
+      async <I extends RuntimeComponentId>(
+        id: I,
+      ): Promise<RuntimeComponentLease<I>> => {
+        if (id !== 'bash-engine') throw new Error('Unexpected component')
+        const api = {
+          createSession: jest.fn().mockImplementation((options) => {
+            createSessionOptions = options
+            return {
+              exec: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+              dispose: jest.fn(),
+            }
+          }),
+          dispose: async () => undefined,
+        }
+        return {
+          api,
+          release: jest.fn(),
+        } as unknown as RuntimeComponentLease<I>
+      },
+    )
+
+    await callLocalFileTool({
+      app: mockApp,
+      toolName: 'bash',
+      args: { command: 'ls' },
+      toolCallId: 'call-readonly',
+      bashReadOnly: true,
+    })
+
+    expect(createSessionOptions?.readOnly).toBe(true)
+  })
+
+  it('defaults readOnly to false when bashReadOnly is not set', async () => {
+    let createSessionOptions: { readOnly?: boolean } | undefined
+    setRuntimeComponentAcquirerForTests(
+      async <I extends RuntimeComponentId>(
+        id: I,
+      ): Promise<RuntimeComponentLease<I>> => {
+        if (id !== 'bash-engine') throw new Error('Unexpected component')
+        const api = {
+          createSession: jest.fn().mockImplementation((options) => {
+            createSessionOptions = options
+            return {
+              exec: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+              dispose: jest.fn(),
+            }
+          }),
+          dispose: async () => undefined,
+        }
+        return {
+          api,
+          release: jest.fn(),
+        } as unknown as RuntimeComponentLease<I>
+      },
+    )
+
+    await callLocalFileTool({
+      app: mockApp,
+      toolName: 'bash',
+      args: { command: 'ls' },
+      toolCallId: 'call-writable',
+    })
+
+    expect(createSessionOptions?.readOnly).toBe(false)
+  })
+})
+
 describe('delegate_subagent model selection', () => {
   const buildSettings = (): YoloSettings =>
     ({
@@ -2966,9 +3108,8 @@ describe('delegate_subagent model selection', () => {
       ],
       mcp: {
         servers: [],
-        enableToolDisclosure: false,
-        builtinToolOptions: {
-          delegate_subagent: {
+        builtinCapabilityOptions: {
+          subagent_delegation: {
             allowedModelIds: ['openai/gpt-5', 'openai/gpt-4.1-mini'],
             preferredModelId: 'openai/gpt-4.1-mini',
           },
@@ -3030,623 +3171,66 @@ describe('delegate_subagent model selection', () => {
   })
 })
 
-// ──────────────────────────────────────────────────────────────────
-// fs_read modality schema is tailored per active chat model capability
-// ──────────────────────────────────────────────────────────────────
+describe('model-facing tool name boundary', () => {
+  describe('toModelToolName', () => {
+    it('drops the yolo_local prefix from built-in tools', () => {
+      expect(toModelToolName('yolo_local__fs_read')).toBe('fs_read')
+      expect(toModelToolName('yolo_local__terminal_command')).toBe(
+        'terminal_command',
+      )
+      expect(toModelToolName('yolo_local__invoke_tool')).toBe('invoke_tool')
+    })
 
-describe('fs_read modality schema is tailored per model capability', () => {
-  type FsReadInputSchema = {
-    properties?: {
-      operation?: {
-        properties?: {
-          modality?: {
-            type?: string
-            enum?: string[]
-            description?: string
-          }
-        }
+    it('leaves MCP and module tools fully qualified', () => {
+      // The prefix is their routing key and their only provenance signal.
+      expect(toModelToolName('github__create_issue')).toBe(
+        'github__create_issue',
+      )
+      expect(toModelToolName('yolo_whiteboard__edit_board')).toBe(
+        'yolo_whiteboard__edit_board',
+      )
+    })
+
+    it('passes through a name that carries no server prefix', () => {
+      expect(toModelToolName('fs_read')).toBe('fs_read')
+    })
+  })
+
+  describe('fromModelToolName', () => {
+    it('qualifies built-in short names', () => {
+      expect(fromModelToolName('fs_read')).toBe('yolo_local__fs_read')
+      expect(fromModelToolName('context_compact')).toBe(
+        'yolo_local__context_compact',
+      )
+    })
+
+    it('qualifies the two protocol tools, which own no capability', () => {
+      expect(fromModelToolName('load_tool_schemas')).toBe(
+        'yolo_local__load_tool_schemas',
+      )
+      expect(fromModelToolName('invoke_tool')).toBe('yolo_local__invoke_tool')
+    })
+
+    it('leaves an already-qualified name alone', () => {
+      expect(fromModelToolName('github__create_issue')).toBe(
+        'github__create_issue',
+      )
+      expect(fromModelToolName('yolo_local__fs_read')).toBe(
+        'yolo_local__fs_read',
+      )
+    })
+
+    it('leaves an unknown short name alone, so the error names what was asked for', () => {
+      expect(fromModelToolName('definitely_not_a_tool')).toBe(
+        'definitely_not_a_tool',
+      )
+    })
+
+    it('round-trips every built-in tool', () => {
+      for (const tool of getLocalFileTools()) {
+        const fqn = `yolo_local__${tool.name}`
+        expect(fromModelToolName(toModelToolName(fqn))).toBe(fqn)
       }
-    }
-  }
-  const getModalitySchema = (modalities?: Array<'text' | 'vision' | 'pdf'>) => {
-    const tools = getLocalFileTools({ chatModelModalities: modalities })
-    const fsRead = tools.find((t) => t.name === 'fs_read')
-    if (!fsRead) throw new Error('fs_read not found')
-    const schema = fsRead.inputSchema as FsReadInputSchema
-    return schema.properties?.operation?.properties?.modality
-  }
-
-  it('exposes the full superset (text/image/pdf) when no model context is passed', () => {
-    // The UI / persistence call sites use this branch so the user-facing
-    // permission editor can show every possible modality independent of
-    // which model happens to be active.
-    const modality = getModalitySchema(undefined)
-    expect(modality).toBeDefined()
-    expect(modality?.enum).toEqual(['text', 'image', 'pdf'])
-  })
-
-  it("PDF-capable model: enum is ['text', 'pdf']; image is NOT exposed", () => {
-    // Image is meaningless on PDF-capable models — native PDF strictly
-    // dominates. Removing it from the enum makes the wrong choice
-    // structurally unrepresentable.
-    const modality = getModalitySchema(['text', 'vision', 'pdf'])
-    expect(modality).toBeDefined()
-    expect(modality?.enum).toEqual(['text', 'pdf'])
-    expect(modality?.enum).not.toContain('image')
-  })
-
-  it("vision-capable (non-PDF) model: enum is ['text', 'image']; pdf is NOT exposed", () => {
-    // pdf is meaningless without native PDF support. Image is the
-    // legitimate visual workaround in this case.
-    const modality = getModalitySchema(['text', 'vision'])
-    expect(modality).toBeDefined()
-    expect(modality?.enum).toEqual(['text', 'image'])
-    expect(modality?.enum).not.toContain('pdf')
-  })
-
-  it('text-only model: modality field is omitted from the schema entirely', () => {
-    // No override is meaningful — every path collapses to text. The
-    // cleanest signal to the model is to not show the field at all.
-    expect(getModalitySchema(['text'])).toBeUndefined()
-  })
-
-  it('pdf-only (hypothetical, no vision) model: enum still excludes image', () => {
-    // Defensive: even a model declared pdf-capable but not vision-capable
-    // should never see image as a choice.
-    const modality = getModalitySchema(['text', 'pdf'])
-    expect(modality?.enum).toEqual(['text', 'pdf'])
-  })
-})
-
-// ──────────────────────────────────────────────────────────────────
-// fs_read PDF vision-downgrade warning
-// ──────────────────────────────────────────────────────────────────
-
-jest.mock('../../utils/pdf/extractPdfText', () => ({
-  PDF_INDEX_MAX_BYTES: 50 * 1024 * 1024,
-  PDF_INDEX_MAX_PAGES: 500,
-  extractPdfText: jest.fn(),
-}))
-
-jest.mock('../../utils/pdf/renderPdfPagesToImages', () => ({
-  renderPdfPagesToImages: jest.fn(),
-}))
-
-describe('fs_read PDF vision-downgrade warning', () => {
-  const extractMock = extractPdfText as jest.MockedFunction<
-    typeof extractPdfText
-  >
-  const renderMock = renderPdfPagesToImages as jest.MockedFunction<
-    typeof renderPdfPagesToImages
-  >
-
-  const makePdfFile = () =>
-    Object.assign(new TFile(), {
-      path: 'doc.pdf',
-      extension: 'pdf',
-      stat: { size: 1024, mtime: 0 },
     })
-
-  const buildSettings = (modalities: Array<'text' | 'vision'>): YoloSettings =>
-    ({
-      chatOptions: {
-        imageReadingEnabled: true,
-        imageCompressionEnabled: false,
-        imageCompressionQuality: 85,
-        externalImageFetchEnabled: false,
-      },
-      chatModels: [
-        {
-          id: 'provider/model',
-          providerId: 'provider',
-          model: 'model',
-          modalities,
-        },
-      ],
-    }) as unknown as YoloSettings
-
-  beforeEach(() => {
-    extractMock.mockReset()
-    renderMock.mockReset()
-    extractMock.mockResolvedValue({
-      pages: [
-        { page: 1, text: 'page one content' },
-        { page: 2, text: 'page two content' },
-      ],
-    })
-    renderMock.mockResolvedValue({
-      totalPages: 2,
-      rendered: [{ page: 1, dataUrl: 'data:image/png;base64,AAA' }],
-    } as unknown as Awaited<ReturnType<typeof renderPdfPagesToImages>>)
-  })
-
-  const callPdfRead = (
-    modality: 'text' | 'image',
-    modalities: Array<'text' | 'vision'>,
-  ) => {
-    const file = makePdfFile()
-    return callLocalFileTool({
-      app: {
-        vault: {
-          getFileByPath: jest.fn().mockReturnValue(file),
-          read: jest.fn().mockResolvedValue(''),
-        },
-      } as unknown as App,
-      toolName: 'fs_read',
-      toolCallId: 'tc-pdf',
-      args: {
-        paths: ['doc.pdf'],
-        operation: { type: 'full', modality },
-      },
-      settings: buildSettings(modalities),
-      chatModelId: 'provider/model',
-    })
-  }
-
-  it('adds effectiveModality and warning when modality=image but model is text-only', async () => {
-    const result = await callPdfRead('image', ['text'])
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-    // Should have fallen back to text extraction
-    expect(extractMock).toHaveBeenCalled()
-    expect(renderMock).not.toHaveBeenCalled()
-    const payload = JSON.parse(result.text) as {
-      results: Array<{
-        effectiveModality?: string
-        warning?: string
-      }>
-    }
-    expect(payload.results[0]?.effectiveModality).toBe('text')
-    expect(payload.results[0]?.warning).toBe(
-      '当前模型不支持图像输入，已自动降级为文本读取',
-    )
-  })
-
-  it('does NOT add effectiveModality/warning when modality=image and model supports vision', async () => {
-    const result = await callPdfRead('image', ['text', 'vision'])
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-    // Should have taken image path
-    expect(renderMock).toHaveBeenCalled()
-    expect(extractMock).not.toHaveBeenCalled()
-    // Image path builds a separate results entry without these fields
-    const payload = JSON.parse(result.text) as {
-      results: Array<{
-        effectiveModality?: string
-        warning?: string
-      }>
-    }
-    expect(payload.results[0]?.effectiveModality).toBeUndefined()
-    expect(payload.results[0]?.warning).toBeUndefined()
-  })
-
-  it('does NOT add effectiveModality/warning when modality=text regardless of model', async () => {
-    const result = await callPdfRead('text', ['text'])
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-    const payload = JSON.parse(result.text) as {
-      results: Array<{
-        effectiveModality?: string
-        warning?: string
-      }>
-    }
-    expect(payload.results[0]?.effectiveModality).toBeUndefined()
-    expect(payload.results[0]?.warning).toBeUndefined()
-  })
-})
-
-// fs_read PDF native slice (default modality + explicit overrides)
-// ──────────────────────────────────────────────────────────────────
-
-describe('fs_read PDF native slice', () => {
-  const sliceMock = slicePdfPages as jest.MockedFunction<typeof slicePdfPages>
-  const extractMockNative = extractPdfText as jest.MockedFunction<
-    typeof extractPdfText
-  >
-  const pdfLibMock = PDFDocument as unknown as {
-    load: jest.Mock
-    create: jest.Mock
-    __setPageCount: (n: number) => void
-  }
-
-  const makePdfFile = () =>
-    Object.assign(new TFile(), {
-      path: 'report.pdf',
-      extension: 'pdf',
-      name: 'report.pdf',
-      stat: { size: 4096, mtime: 0 },
-    })
-
-  const buildSettings = (
-    modalities: Array<'text' | 'vision' | 'pdf'>,
-  ): YoloSettings =>
-    ({
-      chatOptions: {
-        imageReadingEnabled: true,
-        imageCompressionEnabled: false,
-        imageCompressionQuality: 85,
-        externalImageFetchEnabled: false,
-      },
-      chatModels: [
-        {
-          id: 'provider/model',
-          providerId: 'provider',
-          model: 'model',
-          modalities,
-        },
-      ],
-    }) as unknown as YoloSettings
-
-  const FAKE_PDF_BYTES = new Uint8Array([1, 2, 3, 4])
-
-  beforeEach(() => {
-    jest.clearAllMocks()
-    pdfLibMock.__setPageCount(5)
-    sliceMock.mockImplementation(async (_bytes, range) => ({
-      bytes: FAKE_PDF_BYTES,
-      totalSourcePages: 5,
-      actualStart: range.startPage,
-      actualEnd: range.endPage !== undefined ? Math.min(range.endPage, 5) : 5,
-    }))
-    extractMockNative.mockResolvedValue({
-      pages: [
-        { page: 1, text: 'page one' },
-        { page: 2, text: 'page two' },
-        { page: 3, text: 'page three' },
-      ],
-    })
-  })
-
-  // `modality` may be:
-  //   • undefined → omitted from the request, exercising default behavior
-  //   • 'text' / 'image' / 'pdf' → explicit caller override
-  // The schema exposed to the model is tailored per capability, but the
-  // parser still accepts the full superset for resilience (see resolver
-  // safety-net tests near the bottom of this describe block).
-  // Legacy value 'auto' is not accepted — see the dedicated rejection test.
-  const callPdfSliceRead = (
-    modality: 'text' | 'image' | 'pdf' | undefined,
-    modalities: Array<'text' | 'vision' | 'pdf'>,
-    operationType: 'full' | 'lines' = 'lines',
-    startLine = 1,
-    endLine = 2,
-  ) => {
-    const file = makePdfFile()
-    const baseOp =
-      operationType === 'full'
-        ? { type: 'full' as const }
-        : { type: 'lines' as const, startLine, endLine }
-    const operation = modality === undefined ? baseOp : { ...baseOp, modality }
-    return callLocalFileTool({
-      app: {
-        vault: {
-          getFileByPath: jest.fn().mockReturnValue(file),
-          read: jest.fn().mockResolvedValue(''),
-          readBinary: jest.fn().mockResolvedValue(new ArrayBuffer(4)),
-        },
-      } as unknown as App,
-      toolName: 'fs_read',
-      toolCallId: 'tc-pdf-native',
-      args: {
-        paths: ['report.pdf'],
-        operation,
-      },
-      settings: buildSettings(modalities),
-      chatModelId: 'provider/model',
-    })
-  }
-
-  it('no modality + pdf-capable model → takes native pdf path with original page range in name', async () => {
-    // Default behavior (modality omitted): the runtime decides based on the
-    // active model's capabilities. With a PDF-capable model this MUST land on
-    // the native pdf slice path — that's the whole point of leaving it unset.
-    const result = await callPdfSliceRead(undefined, ['text', 'vision', 'pdf'])
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-
-    expect(sliceMock).toHaveBeenCalled()
-    expect(result.contentParts).toBeDefined()
-    expect(result.contentParts).toHaveLength(1)
-    const part = result.contentParts![0]
-    expect(part?.type).toBe('document')
-    if (part?.type !== 'document') throw new Error('expected document part')
-    expect(part.name).toContain('pages 1')
-    expect(part.name).toContain('2')
-
-    // text field should explain page renumbering
-    const payload = JSON.parse(result.text) as {
-      results: Array<{ content: string; effectiveModality?: string }>
-    }
-    expect(payload.results[0]?.content).toContain('ORIGINAL page numbers')
-    expect(payload.results[0]?.effectiveModality).toBe('pdf')
-  })
-
-  it('no modality + vision-only model → takes text path (image is NEVER auto-selected)', async () => {
-    // Regression guard for the auto-priority fix: previously the default
-    // resolved to `pdf > image > text`, silently rendering every page to a
-    // PNG for any vision-capable model — extremely expensive and almost
-    // never what the caller wants. The new contract is `pdf > text`; image
-    // must be opted into explicitly via modality:'image'.
-    const renderMock = renderPdfPagesToImages as jest.MockedFunction<
-      typeof renderPdfPagesToImages
-    >
-
-    const result = await callPdfSliceRead(undefined, ['text', 'vision'])
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-
-    expect(sliceMock).not.toHaveBeenCalled()
-    expect(renderMock).not.toHaveBeenCalled()
-    expect(extractMockNative).toHaveBeenCalled()
-    // No document/image parts expected — text is returned inline as result.text
-    const docParts = (result.contentParts ?? []).filter(
-      (p) => p.type === 'document',
-    )
-    expect(docParts).toHaveLength(0)
-  })
-
-  it('no modality + text-only model → takes text path', async () => {
-    const result = await callPdfSliceRead(undefined, ['text'])
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-
-    expect(sliceMock).not.toHaveBeenCalled()
-    expect(extractMockNative).toHaveBeenCalled()
-    expect(result.contentParts).toBeUndefined()
-  })
-
-  it('no chatModelId → default modality does NOT take pdf path (conservative fallback)', async () => {
-    const file = makePdfFile()
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getFileByPath: jest.fn().mockReturnValue(file),
-          readBinary: jest.fn().mockResolvedValue(new ArrayBuffer(4)),
-        },
-      } as unknown as App,
-      toolName: 'fs_read',
-      toolCallId: 'tc-no-model',
-      args: {
-        paths: ['report.pdf'],
-        operation: {
-          type: 'lines',
-          startLine: 1,
-          endLine: 2,
-          // modality intentionally omitted
-        },
-      },
-      // No settings / chatModelId supplied
-    })
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    // slicePdfPages should NOT have been called
-    expect(sliceMock).not.toHaveBeenCalled()
-  })
-
-  it('slice fails (PdfSliceError) → falls back to text, warning present', async () => {
-    sliceMock.mockRejectedValueOnce(
-      new PdfSliceError('load-failed', 'encrypted PDF'),
-    )
-
-    const result = await callPdfSliceRead(undefined, ['text', 'vision', 'pdf'])
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-
-    expect(extractMockNative).toHaveBeenCalled()
-    const payload = JSON.parse(result.text) as {
-      results: Array<{ content: string; effectiveModality?: string }>
-    }
-    expect(payload.results[0]?.content).toContain('PDF native slice failed')
-    expect(payload.results[0]?.content).toContain('encrypted PDF')
-    expect(payload.results[0]?.effectiveModality).toBe('text')
-  })
-
-  // ── Bug fix tests ──────────────────────────────────────────────────
-
-  it('full read + slice failure on pdf path → fallback returns all pages (bug 1)', async () => {
-    // extractMock returns 3 pages; slice fails → fallback should cover all 3
-    sliceMock.mockRejectedValueOnce(
-      new PdfSliceError('load-failed', 'corrupt PDF'),
-    )
-
-    const result = await callPdfSliceRead(
-      undefined,
-      ['text', 'vision', 'pdf'],
-      'full',
-    )
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-
-    expect(extractMockNative).toHaveBeenCalled()
-    const payload = JSON.parse(result.text) as {
-      results: Array<{ content: string; effectiveModality?: string }>
-    }
-    const content = payload.results[0]?.content ?? ''
-    // All 3 pages must appear in fallback content
-    expect(content).toContain('page one')
-    expect(content).toContain('page two')
-    expect(content).toContain('page three')
-  })
-
-  it('lines read without endLine on pdf path → returns single page (bug 2)', async () => {
-    const file = makePdfFile()
-    const result = await callLocalFileTool({
-      app: {
-        vault: {
-          getFileByPath: jest.fn().mockReturnValue(file),
-          read: jest.fn().mockResolvedValue(''),
-          readBinary: jest.fn().mockResolvedValue(new ArrayBuffer(4)),
-        },
-      } as unknown as App,
-      toolName: 'fs_read',
-      toolCallId: 'tc-no-endline',
-      args: {
-        paths: ['report.pdf'],
-        operation: {
-          type: 'lines',
-          startLine: 2,
-          // endLine and modality intentionally omitted
-        },
-      },
-      settings: buildSettings(['text', 'vision', 'pdf']),
-      chatModelId: 'provider/model',
-    })
-
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-
-    // slicePdfPages should have been called with only page 2 (startPage = endPage = 2)
-    expect(sliceMock).toHaveBeenCalledWith(expect.any(Uint8Array), {
-      startPage: 2,
-      endPage: 2,
-    })
-  })
-
-  it('page count >100 on pdf path → PdfSliceError → fallback returns all pages (bug 1)', async () => {
-    // Set pdf-lib to report 150 pages; sliceMock throws because >MAX_SLICE_PAGES
-    pdfLibMock.__setPageCount(150)
-    extractMockNative.mockResolvedValueOnce({
-      pages: Array.from({ length: 150 }, (_, i) => ({
-        page: i + 1,
-        text: `page ${i + 1} content`,
-      })),
-    })
-    sliceMock.mockRejectedValueOnce(
-      new PdfSliceError(
-        'too-many-pages',
-        'Requested 150 pages but the maximum allowed per slice is 100.',
-      ),
-    )
-
-    const result = await callPdfSliceRead(
-      undefined,
-      ['text', 'vision', 'pdf'],
-      'full',
-    )
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-
-    expect(extractMockNative).toHaveBeenCalled()
-    const payload = JSON.parse(result.text) as {
-      results: Array<{ content: string; totalLines?: number }>
-    }
-    // totalLines should reflect all 150 pages
-    expect(payload.results[0]?.totalLines).toBe(150)
-    // Content must include the last page
-    expect(payload.results[0]?.content).toContain('page 150 content')
-  })
-
-  it('invalid-range PdfSliceError → ok:false hard error, no text fallback', async () => {
-    // Caller asked for a page outside the document — must surface as a model
-    // error rather than silently degrade to text.
-    sliceMock.mockRejectedValueOnce(
-      new PdfSliceError(
-        'invalid-range',
-        "startPage 999 exceeds the source document's 5 pages.",
-      ),
-    )
-
-    const result = await callPdfSliceRead(undefined, ['text', 'vision', 'pdf'])
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-
-    // Text extraction must NOT have run.
-    expect(extractMockNative).not.toHaveBeenCalled()
-
-    const payload = JSON.parse(result.text) as {
-      results: Array<{ ok: boolean; error?: string }>
-    }
-    expect(payload.results[0]?.ok).toBe(false)
-    expect(payload.results[0]?.error).toContain('exceeds')
-  })
-
-  // ── Strict modality rejection (regression guard) ──────────────────────
-  // Legacy 'auto' was removed when we simplified the schema. The parser
-  // must hard-reject it rather than silently coerce — silent acceptance
-  // would let the deprecated value live forever in tool-call contexts.
-  // 'pdf' was reinstated as a valid value (used by the PDF-capable
-  // schema) and is intentionally NOT in this rejection list.
-
-  it.each([['auto'], ['video'], ['random-junk']])(
-    "modality='%s' is rejected as invalid input",
-    async (invalidValue) => {
-      const file = makePdfFile()
-      const result = await callLocalFileTool({
-        app: {
-          vault: { getFileByPath: jest.fn().mockReturnValue(file) },
-        } as unknown as App,
-        toolName: 'fs_read',
-        toolCallId: 'tc-invalid-modality',
-        args: {
-          paths: ['report.pdf'],
-          operation: { type: 'full', modality: invalidValue },
-        },
-        settings: buildSettings(['text', 'vision', 'pdf']),
-        chatModelId: 'provider/model',
-      })
-
-      expect(result.status).toBe(ToolCallResponseStatus.Error)
-      if (result.status !== ToolCallResponseStatus.Error)
-        throw new Error('expected error')
-      expect(result.error).toMatch(/modality/i)
-    },
-  )
-
-  // ── Out-of-schema safety net ─────────────────────────────────────────
-  // The schema exposed to the model is tailored per capability, so e.g.
-  // PDF-capable models normally don't see 'image' as an option. But if a
-  // model somehow sends an out-of-schema modality value (stale tool-call
-  // history, copy-paste from another conversation, etc.), the resolver
-  // maps it to the strictly-better alternative instead of failing.
-
-  it("modality='image' on PDF-capable model → resolves to native PDF (safety-net upgrade)", async () => {
-    // The PDF-capable schema doesn't expose 'image' to the model, so
-    // landing here means the value came in via some unintended channel.
-    // We resolve to native PDF because it strictly dominates image on
-    // PDF-capable models — image was only ever a workaround for models
-    // lacking native PDF support.
-    const result = await callPdfSliceRead('image', ['text', 'vision', 'pdf'])
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-
-    expect(sliceMock).toHaveBeenCalled()
-    expect(result.contentParts?.[0]?.type).toBe('document')
-    const payload = JSON.parse(result.text) as {
-      results: Array<{ effectiveModality?: string }>
-    }
-    expect(payload.results[0]?.effectiveModality).toBe('pdf')
-  })
-
-  it("modality='pdf' on vision-only model → resolves to text with effectiveModality marker (safety-net downgrade)", async () => {
-    // pdf is not exposed in the vision-only schema; if it leaks through,
-    // there's no way to honor it, so fall back to text. The result is
-    // marked with effectiveModality so log readers can see requested vs
-    // executed diverged — no model-visible warning text is attached,
-    // because this is the system's choice, not something the model should
-    // try to "correct" by retrying with a different modality.
-    const result = await callPdfSliceRead('pdf', ['text', 'vision'])
-    expect(result.status).toBe(ToolCallResponseStatus.Success)
-    if (result.status !== ToolCallResponseStatus.Success)
-      throw new Error('expected success')
-
-    expect(sliceMock).not.toHaveBeenCalled()
-    expect(extractMockNative).toHaveBeenCalled()
-
-    const payload = JSON.parse(result.text) as {
-      results: Array<{ effectiveModality?: string; warning?: string }>
-    }
-    expect(payload.results[0]?.effectiveModality).toBe('text')
-    expect(payload.results[0]?.warning).toBeUndefined()
   })
 })

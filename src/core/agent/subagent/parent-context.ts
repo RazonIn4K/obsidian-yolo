@@ -12,6 +12,9 @@ import type { ReasoningLevel } from '../../../types/reasoning'
 import type { RequestContextBuilder } from '../../../utils/chat/requestContextBuilder'
 import type { BaseLLMProvider } from '../../llm/base'
 import type { McpManager } from '../../mcp/mcpManager'
+import type { NativePathBoundary } from '../../tools/native/paths'
+import type { ChatModeCapabilityOverrides } from '../../tools/types'
+import type { RuntimeMode } from '../runtime-mode-prompt'
 import type { AgentRuntimeLoopConfig, AgentRuntimeRunInput } from '../types'
 
 export type SubagentParentContext = {
@@ -21,10 +24,10 @@ export type SubagentParentContext = {
   conversationId: string
   allowedToolNames?: string[]
   toolPreferences?: Record<string, AssistantToolPreference>
+  builtinCapabilityPreferences?: Record<string, AssistantToolPreference>
   toolServerPreferences?: Record<string, AssistantToolServerPreference>
   workspaceScope?: AssistantWorkspaceScope
   allowedSkillPaths?: string[]
-  enableToolDisclosure?: boolean
   reasoningLevel?: ReasoningLevel
   requestParams?: AgentRuntimeRunInput['requestParams']
   loopConfig: AgentRuntimeLoopConfig
@@ -32,6 +35,24 @@ export type SubagentParentContext = {
   mcpManager: McpManager
   assistantId?: string
   bypassToolApproval?: boolean
+  /**
+   * The parent's running mode, and everything about it a child has to run
+   * under too (master.md §4 Q11: a subagent inherits Max's tool set *and* its
+   * trust tier). `allowedToolNames` alone is not enough — it says which tools
+   * exist, not that the mode grants `terminal` past a global switch, not
+   * where the vault boundary is, and not what the environment looks like.
+   */
+  capabilityOverrides?: ChatModeCapabilityOverrides
+  vaultPathBoundary?: NativePathBoundary
+  runtimeMode?: RuntimeMode
+  /**
+   * The parent mode's environment section. A child runs with
+   * `systemPromptOverride`, which skips section assembly entirely, so the
+   * runner appends this to the subagent's own system prompt instead — without
+   * it a Max child would be handed real filesystem and shell tools and no
+   * statement of where it is or which OS it is on.
+   */
+  modeEnvironmentPrompt?: string
 }
 
 export function buildSubagentParentContext(
@@ -45,10 +66,10 @@ export function buildSubagentParentContext(
     conversationId: input.conversationId,
     allowedToolNames: input.allowedToolNames,
     toolPreferences: input.toolPreferences,
+    builtinCapabilityPreferences: input.builtinCapabilityPreferences,
     toolServerPreferences: input.toolServerPreferences,
     workspaceScope: input.workspaceScope,
     allowedSkillPaths: input.allowedSkillPaths,
-    enableToolDisclosure: input.enableToolDisclosure,
     reasoningLevel: input.reasoningLevel,
     requestParams: input.requestParams,
     loopConfig,
@@ -56,5 +77,9 @@ export function buildSubagentParentContext(
     mcpManager: input.mcpManager,
     assistantId: input.assistantId,
     bypassToolApproval: input.bypassToolApproval,
+    capabilityOverrides: input.capabilityOverrides,
+    vaultPathBoundary: input.vaultPathBoundary,
+    runtimeMode: input.runtimeMode,
+    modeEnvironmentPrompt: input.modeEnvironmentPrompt,
   }
 }

@@ -146,6 +146,46 @@ describe('executeSingleTurn', () => {
     )
   })
 
+  it('omits reasoning configuration when using provider defaults', async () => {
+    const provider = new MockProvider()
+    provider.generateResponseMock.mockResolvedValue({
+      id: 'aux-1',
+      model: TEST_MODEL.model,
+      object: 'chat.completion',
+      choices: [
+        {
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'Title' },
+        },
+      ],
+    })
+
+    await executeSingleTurn({
+      providerClient: provider,
+      model: {
+        ...TEST_MODEL,
+        reasoningType: 'openai',
+      },
+      request: {
+        ...TEST_REQUEST,
+        reasoningLevel: 'off',
+      },
+      deliveryMode: 'buffered',
+      purpose: 'lightweight',
+      reasoningPolicy: 'omit',
+    })
+
+    expect(provider.generateResponseMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reasoningType: undefined,
+      }),
+      expect.objectContaining({
+        reasoningLevel: undefined,
+      }),
+      expect.any(Object),
+    )
+  })
+
   it('uses streamed write tool calls without forcing non-stream refresh', async () => {
     const provider = new MockProvider()
     provider.streamResponseMock.mockResolvedValue(
@@ -164,8 +204,8 @@ describe('executeSingleTurn', () => {
                     id: 'tool-1',
                     type: 'function',
                     function: {
-                      name: 'yolo_local__fs_move',
-                      arguments: '{"oldPath":"a.md","newPath":"b.md"}',
+                      name: 'yolo_local__fs_write',
+                      arguments: '{"path":"a.md","content":"b"}',
                     },
                   },
                 ],
@@ -201,8 +241,8 @@ describe('executeSingleTurn', () => {
                 id: 'tool-2',
                 type: 'function',
                 function: {
-                  name: 'yolo_local__fs_move',
-                  arguments: '{"oldPath":"x.md","newPath":"y.md"}',
+                  name: 'yolo_local__fs_write',
+                  arguments: '{"path":"x.md","content":"y"}',
                 },
               },
             ],
@@ -222,10 +262,10 @@ describe('executeSingleTurn', () => {
     expect(result.toolCalls).toEqual([
       {
         id: 'tool-1',
-        name: 'yolo_local__fs_move',
+        name: 'yolo_local__fs_write',
         arguments: completeArgs(
-          { oldPath: 'a.md', newPath: 'b.md' },
-          '{"oldPath":"a.md","newPath":"b.md"}',
+          { path: 'a.md', content: 'b' },
+          '{"path":"a.md","content":"b"}',
         ),
         metadata: undefined,
       },
@@ -313,7 +353,7 @@ describe('executeSingleTurn', () => {
                     id: 'tool-read-1',
                     type: 'function',
                     function: {
-                      name: 'yolo_local__fs_read',
+                      name: 'test__nested_object',
                       arguments: '{"paths":["foo.md"],"operation":',
                     },
                   },
@@ -367,7 +407,7 @@ describe('executeSingleTurn', () => {
     expect(result.toolCalls).toEqual([
       {
         id: 'tool-read-1',
-        name: 'yolo_local__fs_read',
+        name: 'test__nested_object',
         arguments: completeArgs(
           {
             paths: ['foo.md'],

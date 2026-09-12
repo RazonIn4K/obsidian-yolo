@@ -11,7 +11,7 @@ const formatDelta = (value: number, sign: '+' | '-') => {
   return `${sign}${value}`
 }
 
-const renderDeltaPair = (addedLines: number, removedLines: number) => {
+export const renderDeltaPair = (addedLines: number, removedLines: number) => {
   const items: Array<ReactElement> = []
 
   if (addedLines > 0) {
@@ -60,12 +60,14 @@ const AssistantEditSummary = memo(function AssistantEditSummary({
   onUndo,
   onUndoFile,
   onOpenFile,
+  showUndo,
 }: {
   summary: GroupEditSummary
   undoingTargetKey: string | null
   onUndo: () => void
   onUndoFile: (path: string) => void
   onOpenFile: (file: GroupEditSummaryPathItem) => void
+  showUndo: boolean
 }) {
   const { t } = useLanguage()
   const undoDisabled =
@@ -84,25 +86,32 @@ const AssistantEditSummary = memo(function AssistantEditSummary({
               '{count} file(s) changed',
             ).replace('{count}', String(summary.totalFiles))}
           </span>
-          {renderDeltaPair(summary.totalAddedLines, summary.totalRemovedLines)}
+          {summary.totalLineStatsAvailable
+            ? renderDeltaPair(
+                summary.totalAddedLines,
+                summary.totalRemovedLines,
+              )
+            : null}
         </div>
-        <button
-          type="button"
-          className="yolo-agent-edit-summary-undo"
-          onClick={undoDisabled ? undefined : onUndo}
-          disabled={undoDisabled}
-        >
-          {isUndoingAll ? (
-            <Loader2 size={14} className="yolo-spinner" />
-          ) : (
-            <Undo2 size={14} />
-          )}
-          <span>
-            {summary.hasUndoableFiles
-              ? t('chat.editSummary.undo', 'Undo')
-              : t('chat.editSummary.undone', 'Undone')}
-          </span>
-        </button>
+        {showUndo ? (
+          <button
+            type="button"
+            className="yolo-agent-edit-summary-undo"
+            onClick={undoDisabled ? undefined : onUndo}
+            disabled={undoDisabled}
+          >
+            {isUndoingAll ? (
+              <Loader2 size={14} className="yolo-spinner" />
+            ) : (
+              <Undo2 size={14} />
+            )}
+            <span>
+              {summary.hasUndoableFiles
+                ? t('chat.editSummary.undo', 'Undo')
+                : t('chat.editSummary.undone', 'Undone')}
+            </span>
+          </button>
+        ) : null}
       </div>
       <div className="yolo-agent-edit-summary-list">
         {summary.files.map((file) => (
@@ -128,30 +137,37 @@ const AssistantEditSummary = memo(function AssistantEditSummary({
               </span>
             </button>
             <div className="yolo-agent-edit-summary-item-trailing">
-              <button
-                type="button"
-                className={`yolo-agent-edit-summary-undo yolo-agent-edit-summary-undo-icon${
-                  undoingTargetKey === file.path ? ' is-visible' : ''
-                }`}
-                onClick={
-                  file.undoStatus === 'available' && undoingTargetKey === null
-                    ? () => onUndoFile(file.path)
-                    : undefined
-                }
-                disabled={
-                  file.undoStatus !== 'available' || undoingTargetKey !== null
-                }
-                aria-label={t('chat.editSummary.undoFile', 'Undo file change')}
-              >
-                {undoingTargetKey === file.path ? (
-                  <Loader2 size={14} className="yolo-spinner" />
-                ) : (
-                  <Undo2 size={14} />
-                )}
-              </button>
-              <div className="yolo-agent-edit-summary-deltas">
-                {renderDeltaPair(file.addedLines, file.removedLines)}
-              </div>
+              {showUndo ? (
+                <button
+                  type="button"
+                  className={`yolo-agent-edit-summary-undo yolo-agent-edit-summary-undo-icon${
+                    undoingTargetKey === file.path ? ' is-visible' : ''
+                  }`}
+                  onClick={
+                    file.undoStatus === 'available' && undoingTargetKey === null
+                      ? () => onUndoFile(file.path)
+                      : undefined
+                  }
+                  disabled={
+                    file.undoStatus !== 'available' || undoingTargetKey !== null
+                  }
+                  aria-label={t(
+                    'chat.editSummary.undoFile',
+                    'Undo file change',
+                  )}
+                >
+                  {undoingTargetKey === file.path ? (
+                    <Loader2 size={14} className="yolo-spinner" />
+                  ) : (
+                    <Undo2 size={14} />
+                  )}
+                </button>
+              ) : null}
+              {file.lineStatsAvailable ? (
+                <div className="yolo-agent-edit-summary-deltas">
+                  {renderDeltaPair(file.addedLines, file.removedLines)}
+                </div>
+              ) : null}
             </div>
           </div>
         ))}

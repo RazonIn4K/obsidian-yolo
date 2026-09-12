@@ -1,4 +1,6 @@
+import { anysearchProvider } from './providers/anysearch'
 import { bingProvider } from './providers/bing'
+import { exaProvider } from './providers/exa'
 import { geminiGroundingProvider } from './providers/gemini-grounding'
 import { grokSearchProvider } from './providers/grok'
 import { jinaProvider } from './providers/jina'
@@ -15,6 +17,8 @@ const PROVIDERS: Record<string, WebSearchProvider<any>> = {
   'gemini-grounding': geminiGroundingProvider,
   grok: grokSearchProvider,
   zhipu: zhipuProvider,
+  exa: exaProvider,
+  anysearch: anysearchProvider,
 }
 
 export function getWebSearchProvider(

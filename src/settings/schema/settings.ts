@@ -1,4 +1,5 @@
 import { normalizeSubagentModelOptions } from '../../core/agent/subagent/model-config'
+import { LOCAL_EMBEDDING_PROVIDER_ID } from '../../core/rag/local-embedding/constants'
 
 import { SETTINGS_SCHEMA_VERSION, SETTING_MIGRATIONS } from './migrations'
 import { YoloSettings, yoloSettingsSchema } from './setting.types'
@@ -14,7 +15,15 @@ export function normalizeYoloSettingsReferences(
   )
   const seenEmbeddingModelKeys = new Set<string>()
   const embeddingModels = settings.embeddingModels.filter((model) => {
-    if (!validProviderIds.has(model.providerId)) {
+    // `yolo-local` (P2, docs/plans/08-22-local-embedding/00-plan.md §3.5) is
+    // a reserved providerId with deliberately no matching `settings.providers`
+    // entry — it's not "a provider" (no API key/base URL), it's the RAG-only
+    // local inference path. Without this carve-out every local embedding
+    // model would be silently dropped here on the very next settings save.
+    if (
+      model.providerId !== LOCAL_EMBEDDING_PROVIDER_ID &&
+      !validProviderIds.has(model.providerId)
+    ) {
       return false
     }
 
@@ -27,9 +36,6 @@ export function normalizeYoloSettingsReferences(
     return true
   })
   const validChatModelIds = new Set(chatModels.map((model) => model.id))
-  const enabledChatModelIds = new Set(
-    chatModels.filter((model) => model.enable ?? true).map((model) => model.id),
-  )
   const validEmbeddingModelIds = new Set(
     embeddingModels.map((model) => model.id),
   )
@@ -68,10 +74,6 @@ export function normalizeYoloSettingsReferences(
       validChatModelIds,
       fallbackChatModelId,
     ) ?? ''
-  const learningFallbackModelId = enabledChatModelIds.has(normalizedChatModelId)
-    ? normalizedChatModelId
-    : fallbackChatModelId
-
   const normalized: YoloSettings = {
     ...settings,
     chatModels,
@@ -101,15 +103,6 @@ export function normalizeYoloSettingsReferences(
         validChatModelIds,
         fallbackChatModelId,
       ),
-    },
-    learningOptions: {
-      ...settings.learningOptions,
-      modelId:
-        normalizeModelReference(
-          settings.learningOptions.modelId,
-          enabledChatModelIds,
-          learningFallbackModelId,
-        ) || learningFallbackModelId,
     },
     assistants,
     currentAssistantId:

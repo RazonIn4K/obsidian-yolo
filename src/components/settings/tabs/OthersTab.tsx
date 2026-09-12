@@ -4,7 +4,7 @@ import { useLanguage } from '../../../contexts/language-context'
 import { useSettings } from '../../../contexts/settings-context'
 import { selectionHighlightController } from '../../../features/editor/selection-highlight/selectionHighlightController'
 import { Language } from '../../../i18n'
-import YoloPlugin from '../../../main'
+import type YoloPlugin from '../../../main'
 import { openExternalLink } from '../../../utils/openExternalLink'
 import { ObsidianButton } from '../../common/ObsidianButton'
 import { ObsidianDropdown } from '../../common/ObsidianDropdown'
@@ -77,6 +77,22 @@ export function OthersTab({ app, plugin }: OthersTabProps) {
         })
       } catch (error: unknown) {
         console.error('Failed to update mention context mode', error)
+      }
+    })()
+  }
+
+  const handleEnterKeyCreatesNewlineChange = (value: boolean) => {
+    void (async () => {
+      try {
+        await setSettings({
+          ...settings,
+          chatOptions: {
+            ...settings.chatOptions,
+            enterKeyCreatesNewline: value,
+          },
+        })
+      } catch (error: unknown) {
+        console.error('Failed to update Enter key behavior', error)
       }
     })()
   }
@@ -185,8 +201,15 @@ export function OthersTab({ app, plugin }: OthersTabProps) {
           className="yolo-settings-support-yolo"
         >
           <ObsidianButton
-            text={t('settings.supportYolo.buyMeACoffee')}
+            text={t('settings.supportYolo.afdian')}
             onClick={() => openExternalLink('https://afdian.com/a/lapis0x0')}
+            cta
+          />
+          <ObsidianButton
+            text={t('settings.supportYolo.buyMeACoffee')}
+            onClick={() =>
+              openExternalLink('https://buymeacoffee.com/lapis0x0')
+            }
             cta
           />
           <ObsidianButton
@@ -243,6 +266,22 @@ export function OthersTab({ app, plugin }: OthersTabProps) {
                   last: t('settings.etc.ribbonClickActionLast', '上次的位置'),
                 }}
                 onChange={handleRibbonClickActionChange}
+              />
+            </ObsidianSetting>
+            <ObsidianSetting
+              name={t(
+                'settings.etc.enterKeyCreatesNewline',
+                '使用 Enter 键换行',
+              )}
+              desc={t(
+                'settings.etc.enterKeyCreatesNewlineDesc',
+                '适用于 Chat 与 Quick Ask 输入框。开启后，按 Cmd/Ctrl + Enter 发送。',
+              )}
+              className="yolo-settings-card"
+            >
+              <ObsidianToggle
+                value={settings.chatOptions.enterKeyCreatesNewline ?? false}
+                onChange={handleEnterKeyCreatesNewlineChange}
               />
             </ObsidianSetting>
             <ObsidianSetting

@@ -7,6 +7,7 @@ import type { TFile } from 'obsidian'
 
 import type {
   Mentionable,
+  SerializedMentionableAssistantQuote,
   SerializedMentionableBlock,
 } from '../../types/mentionable'
 
@@ -164,6 +165,55 @@ describe('getMentionableKey – block with pageNumber', () => {
   })
 })
 
+// ──────────────────────────────────────────────────────────────────────────────
+// getMentionableKey – annotationNumber makes keys distinct (PDF multi-quote
+// annotation, docs/plans/2026-08-16-pdf-annotation-quotes.md). Two PDF
+// annotations that select the same repeated substring on the same page
+// otherwise collide on identical file/line/page/contentHash — see bug 3 of
+// that plan's review.
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('getMentionableKey – block with annotationNumber', () => {
+  const baseBlock: SerializedMentionableBlock = {
+    type: 'block',
+    content: 'same content',
+    file: 'notes/paper.pdf',
+    startLine: 0,
+    endLine: 0,
+    pageNumber: 1,
+    contentHash: 'abc123',
+  }
+
+  test('block without annotationNumber has the same key format as today (backward compatible)', () => {
+    const key = getMentionableKey(baseBlock)
+    expect(key).toBe('block:notes/paper.pdf:0:0:p1:abc123')
+  })
+
+  test('two annotations with identical file/line/page/contentHash but different annotationNumber get distinct keys', () => {
+    const key1 = getMentionableKey({ ...baseBlock, annotationNumber: 1 })
+    const key2 = getMentionableKey({ ...baseBlock, annotationNumber: 2 })
+    expect(key1).not.toBe(key2)
+  })
+
+  test('annotationNumber and no annotationNumber produce different keys', () => {
+    const keyWithAnnotation = getMentionableKey({
+      ...baseBlock,
+      annotationNumber: 1,
+    })
+    const keyWithoutAnnotation = getMentionableKey(baseBlock)
+    expect(keyWithAnnotation).not.toBe(keyWithoutAnnotation)
+  })
+
+  test('historical (pre-annotation) blocks without annotationNumber are unaffected by unrelated fields like comment', () => {
+    // Deserialized history / existing add-to-sidebar references never set
+    // annotationNumber; the key must stay identical regardless of `comment`
+    // (which also predates this feature on assistant-quote but is new on
+    // block) so their identity never drifts across a reload.
+    const key = getMentionableKey({ ...baseBlock, comment: 'unused' })
+    expect(key).toBe('block:notes/paper.pdf:0:0:p1:abc123')
+  })
+})
+
 describe('web selection mentionables', () => {
   test('round-trips through serialize → deserialize', () => {
     const original: Mentionable = {
@@ -206,5 +256,62 @@ describe('web selection mentionables', () => {
         `web-selection:https://example.com/article:${serialized.contentHash}`,
       )
     }
+  })
+})
+
+describe('assistant quote annotations', () => {
+  const quote: Mentionable = {
+    type: 'assistant-quote',
+    id: 'annotation-1',
+    annotationNumber: 4,
+    conversationId: 'conversation-1',
+    messageId: 'assistant-1',
+    content: 'Selected reply text',
+    comment: 'Rewrite this more directly.',
+    selector: {
+      start: 10,
+      end: 29,
+      exact: 'Selected reply text',
+      prefix: 'Context: ',
+      suffix: ' after',
+    },
+  }
+
+  test('round-trips the comment and selector', () => {
+    const serialized = serializeMentionable(quote)
+    const restored = deserializeMentionable(serialized, makeMockApp() as any)
+
+    expect(restored).toMatchObject(quote)
+  })
+
+  test('uses the annotation id as stable identity', () => {
+    const serialized = serializeMentionable(
+      quote,
+    ) as SerializedMentionableAssistantQuote
+    expect(getMentionableKey(serialized)).toBe('assistant-quote:annotation-1')
+    expect(
+      getMentionableKey({ ...serialized, comment: 'Updated feedback' }),
+    ).toBe('assistant-quote:annotation-1')
+  })
+
+  test('distinguishes legacy quotes at different rendered positions', () => {
+    const base: SerializedMentionableAssistantQuote = {
+      type: 'assistant-quote',
+      conversationId: 'conversation-1',
+      messageId: 'assistant-1',
+      content: 'Repeated text',
+      contentHash: 'same-hash',
+    }
+    expect(
+      getMentionableKey({
+        ...base,
+        selector: { start: 0, end: 13, exact: 'Repeated text' },
+      }),
+    ).not.toBe(
+      getMentionableKey({
+        ...base,
+        selector: { start: 20, end: 33, exact: 'Repeated text' },
+      }),
+    )
   })
 })

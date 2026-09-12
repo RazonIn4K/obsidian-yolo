@@ -4,9 +4,10 @@ import {
   buildReleaseAssets,
   checkForUpdate,
   compareVersions,
+  fetchReleaseHistoryPage,
+  locateReleaseHistoryPage,
   normalizePluginVersion,
   parseChangelog,
-  parseLatestVersionFromVersionsJson,
   parseReleaseAssets,
   parseReleaseNoteVersion,
   splitReleaseNotesByLanguage,
@@ -31,204 +32,95 @@ function createRequestUrlResponse(text: string): RequestUrlResponse {
   }
 }
 
-describe('parseLatestVersionFromVersionsJson', () => {
-  it('returns the highest normalized version key', () => {
-    expect(
-      parseLatestVersionFromVersionsJson(
-        JSON.stringify({
-          '1.5.9': '1.8.0',
-          '1.5.12.4': '1.8.0',
-          v1: 'ignored',
-          '1.5.12.5': '1.8.0',
-          next: 'ignored',
-        }),
-      ),
-    ).toBe('1.5.12.5')
-  })
-
-  it('returns null for invalid JSON or non-object payloads', () => {
-    expect(parseLatestVersionFromVersionsJson('not-json')).toBeNull()
-    expect(parseLatestVersionFromVersionsJson('[]')).toBeNull()
-  })
-})
-
 describe('checkForUpdate', () => {
+  const asset = (name: string) => ({
+    name,
+    mirrorPath: `core/1.5.12.5/${name}`,
+    canonicalUrl: `https://github.com/Lapis0x0/obsidian-yolo/releases/download/1.5.12.5/${name}`,
+    byteSize: 10,
+    sha256: 'a'.repeat(64),
+  })
+  const feedClient = {
+    loadFresh: jest.fn(async () => ({
+      core: {
+        version: '1.5.12.5',
+        minAppVersion: '1.8.0',
+        releaseUrl:
+          'https://github.com/Lapis0x0/obsidian-yolo/releases/tag/1.5.12.5',
+        releaseNotes: {
+          en: '## 1.5.12.5 Update Toast Notes ✨',
+          zh: '## 1.5.12.5 更新提示说明 ✨',
+        },
+        assets: {
+          mainJs: asset('main.js'),
+          manifestJson: asset('manifest.json'),
+          stylesCss: asset('styles.css'),
+        },
+      },
+      modules: [],
+    })),
+  }
+
   beforeEach(() => {
-    mockedRequestUrl.mockReset()
+    feedClient.loadFresh.mockClear()
     jest.spyOn(console, 'warn').mockImplementation(() => undefined)
   })
 
-  afterEach(() => {
-    jest.useRealTimers()
-    jest.restoreAllMocks()
-  })
+  afterEach(() => jest.restoreAllMocks())
 
-  it('checks versions.json and latest-release-note.md for release metadata', async () => {
-    const releaseNote = [
-      '## 1.5.12.5 Update Toast Notes ✨',
-      '',
-      '### ✨ New',
-      '',
-      '- **Release notes**: The toast can render the latest notes.',
-      '',
-      '---',
-      '',
-      '## 1.5.12.5 更新提示说明 ✨',
-      '',
-      '### ✨ 新增',
-      '',
-      '- **更新说明**：更新提示可以渲染最新说明。',
-    ].join('\n')
-
-    mockedRequestUrl
-      .mockResolvedValueOnce(
-        createRequestUrlResponse(
-          JSON.stringify({
-            '1.5.12.4': '1.8.0',
-            '1.5.12.5': '1.8.0',
-          }),
-        ),
-      )
-      .mockResolvedValueOnce(createRequestUrlResponse(releaseNote))
-
-    await expect(checkForUpdate('1.5.12.4')).resolves.toEqual({
+  it('uses signed Feed metadata for the latest Core', async () => {
+    await expect(
+      checkForUpdate('1.5.12.4', feedClient as never),
+    ).resolves.toEqual({
       hasUpdate: true,
       latestVersion: '1.5.12.5',
       releaseNotes: {
-        en: [
-          '## 1.5.12.5 Update Toast Notes ✨',
-          '',
-          '### ✨ New',
-          '',
-          '- **Release notes**: The toast can render the latest notes.',
-        ].join('\n'),
-        zh: [
-          '## 1.5.12.5 更新提示说明 ✨',
-          '',
-          '### ✨ 新增',
-          '',
-          '- **更新说明**：更新提示可以渲染最新说明。',
-        ].join('\n'),
+        en: '## 1.5.12.5 Update Toast Notes ✨',
+        zh: '## 1.5.12.5 更新提示说明 ✨',
       },
       releaseUrl:
         'https://github.com/Lapis0x0/obsidian-yolo/releases/tag/1.5.12.5',
-      assets: buildReleaseAssets('1.5.12.5'),
+      assets: {
+        mainJs: {
+          url: asset('main.js').canonicalUrl,
+          mirrorUrl: 'https://updates.yoloapp.dev/core/1.5.12.5/main.js',
+          size: 10,
+          sha256: 'a'.repeat(64),
+        },
+        manifestJson: {
+          url: asset('manifest.json').canonicalUrl,
+          mirrorUrl: 'https://updates.yoloapp.dev/core/1.5.12.5/manifest.json',
+          size: 10,
+          sha256: 'a'.repeat(64),
+        },
+        stylesCss: {
+          url: asset('styles.css').canonicalUrl,
+          mirrorUrl: 'https://updates.yoloapp.dev/core/1.5.12.5/styles.css',
+          size: 10,
+          sha256: 'a'.repeat(64),
+        },
+      },
     })
-    expect(mockedRequestUrl).toHaveBeenNthCalledWith(1, {
-      url: 'https://raw.githubusercontent.com/Lapis0x0/obsidian-yolo/main/versions.json',
-      method: 'GET',
-    })
-    expect(mockedRequestUrl).toHaveBeenNthCalledWith(2, {
-      url: 'https://raw.githubusercontent.com/Lapis0x0/obsidian-yolo/main/latest-release-note.md',
-      method: 'GET',
-    })
+    expect(feedClient.loadFresh).toHaveBeenCalledTimes(1)
   })
 
-  it('does not fetch latest-release-note.md when there is no update', async () => {
-    mockedRequestUrl.mockResolvedValue(
-      createRequestUrlResponse(
-        JSON.stringify({
-          '1.5.12.4': '1.8.0',
-          '1.5.12.5': '1.8.0',
-        }),
-      ),
-    )
-
-    await expect(checkForUpdate('1.5.12.5')).resolves.toEqual({
+  it('hides release notes when the installed Core is current', async () => {
+    await expect(
+      checkForUpdate('1.5.12.5', feedClient as never),
+    ).resolves.toMatchObject({
       hasUpdate: false,
       latestVersion: '1.5.12.5',
       releaseNotes: { en: null, zh: null },
-      releaseUrl:
-        'https://github.com/Lapis0x0/obsidian-yolo/releases/tag/1.5.12.5',
-      assets: buildReleaseAssets('1.5.12.5'),
-    })
-    expect(mockedRequestUrl).toHaveBeenCalledTimes(1)
-    expect(mockedRequestUrl).toHaveBeenCalledWith({
-      url: 'https://raw.githubusercontent.com/Lapis0x0/obsidian-yolo/main/versions.json',
-      method: 'GET',
     })
   })
 
-  it('ignores latest-release-note.md when its heading version does not match latestVersion', async () => {
-    jest.useFakeTimers()
-    mockedRequestUrl
-      .mockResolvedValueOnce(
-        createRequestUrlResponse(
-          JSON.stringify({
-            '1.5.12.4': '1.8.0',
-            '1.5.12.5': '1.8.0',
-          }),
-        ),
-      )
-      .mockResolvedValue(
-        createRequestUrlResponse('## 1.5.12.4 Old Notes\n\n- stale'),
-      )
-
-    const result = checkForUpdate('1.5.12.4')
-    await jest.advanceTimersByTimeAsync(800)
-    await jest.advanceTimersByTimeAsync(2000)
-
-    await expect(result).resolves.toEqual({
-      hasUpdate: true,
-      latestVersion: '1.5.12.5',
-      releaseNotes: { en: null, zh: null },
-      releaseUrl:
-        'https://github.com/Lapis0x0/obsidian-yolo/releases/tag/1.5.12.5',
-      assets: buildReleaseAssets('1.5.12.5'),
-    })
+  it('returns null when all validated Feed sources are unavailable', async () => {
+    feedClient.loadFresh.mockRejectedValueOnce(new Error('unavailable'))
+    await expect(
+      checkForUpdate('1.5.12.4', feedClient as never),
+    ).resolves.toBeNull()
     expect(console.warn).toHaveBeenCalledWith(
-      '[YOLO] Plugin update release note fetch failed after 3 attempts: latest-release-note.md version 1.5.12.4 does not match 1.5.12.5.',
-    )
-    expect(mockedRequestUrl).toHaveBeenCalledTimes(4)
-  })
-
-  it('retries latest-release-note.md when the first fetch is stale', async () => {
-    jest.useFakeTimers()
-    const staleReleaseNote = '## 1.5.12.4 Old Notes\n\n- stale'
-    const freshReleaseNote = [
-      '## 1.5.12.5 Fresh Notes ✨',
-      '',
-      '### ✨ New',
-      '',
-      '- **Retry works**: The fresh release note is rendered.',
-    ].join('\n')
-
-    mockedRequestUrl
-      .mockResolvedValueOnce(
-        createRequestUrlResponse(
-          JSON.stringify({
-            '1.5.12.4': '1.8.0',
-            '1.5.12.5': '1.8.0',
-          }),
-        ),
-      )
-      .mockResolvedValueOnce(createRequestUrlResponse(staleReleaseNote))
-      .mockResolvedValueOnce(createRequestUrlResponse(freshReleaseNote))
-
-    const result = checkForUpdate('1.5.12.4')
-    await jest.advanceTimersByTimeAsync(800)
-
-    await expect(result).resolves.toEqual({
-      hasUpdate: true,
-      latestVersion: '1.5.12.5',
-      releaseNotes: {
-        en: freshReleaseNote,
-        zh: null,
-      },
-      releaseUrl:
-        'https://github.com/Lapis0x0/obsidian-yolo/releases/tag/1.5.12.5',
-      assets: buildReleaseAssets('1.5.12.5'),
-    })
-    expect(console.warn).not.toHaveBeenCalled()
-    expect(mockedRequestUrl).toHaveBeenCalledTimes(3)
-  })
-
-  it('returns null when versions.json cannot be fetched', async () => {
-    mockedRequestUrl.mockRejectedValue(new Error('Request failed, status 403'))
-
-    await expect(checkForUpdate('1.5.12.4')).resolves.toBeNull()
-    expect(console.warn).toHaveBeenCalledWith(
-      '[YOLO] Plugin update check failed: Request failed, status 403',
+      '[YOLO] Plugin update check failed: unavailable',
     )
   })
 })
@@ -496,6 +388,27 @@ describe('parseChangelog', () => {
     expect(sections[0].items[0].title).toBe('Loose note')
   })
 
+  it('keeps a lead paragraph and hides the release-owner marker', () => {
+    const { sections } = parseChangelog(
+      [
+        '<!-- core-release-owner:123:1 -->',
+        '## 1.6.8 YOLO Whiteboard 🧩',
+        '',
+        '**Introducing YOLO Whiteboard** — a faster canvas.',
+        '',
+        '### Agent & tools',
+        '',
+        '- Tools are disclosed on demand.',
+      ].join('\n'),
+    )
+    expect(sections.map((section) => section.name)).toEqual([
+      '',
+      'Agent & tools',
+    ])
+    expect(sections[0].items[0].title).toBe('Introducing YOLO Whiteboard')
+    expect(sections[0].items[0].body).toBe('— a faster canvas.')
+  })
+
   it('handles asterisk bullet markers (older release style) and the 🔧 tone', () => {
     const body = [
       '## 1.5.9.1 工具按需加载默认关闭 & 工具中断修复 🛠️',
@@ -519,5 +432,82 @@ describe('parseChangelog', () => {
     ).sections[0].items[0]
     expect(item.title).toBe('js_eval UMD 加载与调试报错')
     expect(item.ref).toBe('#354、#355')
+  })
+})
+
+describe('release history products', () => {
+  beforeEach(() => {
+    mockedRequestUrl.mockReset()
+  })
+
+  it('mixes Core and official module releases while excluding unrelated tags', async () => {
+    mockedRequestUrl.mockResolvedValue(
+      createRequestUrlResponse(
+        JSON.stringify([
+          {
+            tag_name: 'learning/v0.1.0',
+            body: '## 0.1.0 Learning update',
+            html_url: 'https://example.test/learning',
+            draft: false,
+            prerelease: false,
+          },
+          {
+            tag_name: '1.6.0.4',
+            body: '## 1.6.0.4 Core update',
+            html_url: 'https://example.test/core',
+            draft: false,
+            prerelease: false,
+          },
+          {
+            tag_name: 'runtime/v1.0.0',
+            body: 'runtime',
+            draft: false,
+            prerelease: true,
+          },
+          {
+            tag_name: 'internal-build',
+            body: 'internal',
+            draft: false,
+            prerelease: false,
+          },
+        ]),
+      ),
+    )
+
+    await expect(fetchReleaseHistoryPage(1)).resolves.toMatchObject({
+      entries: [
+        {
+          productId: 'learning',
+          productName: 'Learning',
+          version: '0.1.0',
+        },
+        {
+          productId: 'core',
+          productName: 'YOLO Core',
+          version: '1.6.0.4',
+        },
+      ],
+      hasNext: false,
+    })
+  })
+
+  it('does not mistake a module version for the installed Core version', async () => {
+    mockedRequestUrl.mockResolvedValue(
+      createRequestUrlResponse(
+        JSON.stringify([
+          {
+            tag_name: 'learning/v0.1.0',
+            body: '## 0.1.0 Learning update',
+            draft: false,
+            prerelease: false,
+          },
+        ]),
+      ),
+    )
+
+    await expect(locateReleaseHistoryPage('0.1.0')).resolves.toMatchObject({
+      pageIndex: 0,
+      found: false,
+    })
   })
 })

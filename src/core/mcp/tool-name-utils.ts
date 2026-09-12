@@ -3,14 +3,43 @@ import { InvalidToolNameException } from './exception'
 const DEFAULT_DELIMITER = '__'
 
 /**
+ * Namespace reserved for module chat mode in-process tool servers (see
+ * `moduleChatModeRegistry.ts`), named `module-mode-<moduleId>-<modeId>`.
+ * User-configured MCP servers may not use this prefix — enforced by default
+ * in `validateServerName` — so a module's chat mode server can never be
+ * shadowed or spoofed by hand-written or imported server config.
+ */
+export const RESERVED_MODULE_MODE_SERVER_PREFIX = 'module-mode-'
+
+/**
+ * Namespace reserved for the host's own in-process tool servers: the built-in
+ * capability server (`yolo_local`) and every module-registered tool set
+ * (`yolo_<setId>`, see `moduleToolSetRegistry.ts`). Reserved for the same
+ * reason as the prefix above — a module tool set's fully-qualified names ride
+ * the frozen system-prompt catalog, so a user-configured server must not be
+ * able to answer to one of them.
+ */
+export const RESERVED_HOST_SERVER_PREFIX = 'yolo_'
+
+const RESERVED_SERVER_PREFIXES = [
+  RESERVED_MODULE_MODE_SERVER_PREFIX,
+  RESERVED_HOST_SERVER_PREFIX,
+] as const
+
+/**
  * Validates that a server name follows the required format and doesn't contain the delimiter
  * @param name Server name to validate
- * @param delimiter Optional custom delimiter
+ * @param options.delimiter Optional custom delimiter
+ * @param options.allowReservedPrefix Permits the reserved prefixes above.
+ * Only the host's own in-process registration path (`registerInProcessServer`)
+ * should pass this — every user-facing config write/validation path (the MCP
+ * server form, `connectServer`) must keep the default rejection.
  */
 export function validateServerName(
   name: string,
-  delimiter: string = DEFAULT_DELIMITER,
+  options: { delimiter?: string; allowReservedPrefix?: boolean } = {},
 ): void {
+  const delimiter = options.delimiter ?? DEFAULT_DELIMITER
   // OpenAI only allows alphanumeric characters, underscores, and hyphens in the tool name
   const regex = /^[a-zA-Z0-9_-]+$/
   if (!regex.test(name)) {
@@ -23,6 +52,16 @@ export function validateServerName(
     throw new Error(
       `MCP server name ${name} should not contain the delimiter ${delimiter}.`,
     )
+  }
+  if (!options.allowReservedPrefix) {
+    const reserved = RESERVED_SERVER_PREFIXES.find((prefix) =>
+      name.startsWith(prefix),
+    )
+    if (reserved) {
+      throw new Error(
+        `MCP server name ${name} uses the reserved "${reserved}" prefix.`,
+      )
+    }
   }
 }
 

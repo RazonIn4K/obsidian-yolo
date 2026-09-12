@@ -31,7 +31,6 @@ export type ChatConversationCompaction = {
   estimatedNextContextTokens?: number
   compactedMessageCount?: number
   estimatedTokensSaved?: number
-  loadedDeferredToolNames?: string[]
   /**
    * Full schemas for on-demand tools that have already been disclosed via
    * `load_tool_schemas` before compaction. Persisted so that — after compaction
@@ -42,6 +41,11 @@ export type ChatConversationCompaction = {
    * Schemas exceeding the size protector are intentionally dropped: in that
    * case the tool reverts to the standard on-demand path (model must call
    * `load_tool_schemas` again). The injected prompt tells the model this.
+   *
+   * This is also the sole record of *what* has been disclosed. A parallel list
+   * of names would outlive the schemas the size protector drops, and the
+   * gateway's "schema was loaded first" gate would then wave through a call
+   * whose schema is no longer anywhere in context.
    */
   loadedDeferredToolSchemas?: Array<{
     name: string
@@ -90,6 +94,17 @@ export type ChatUserMessage = {
    */
   timeContext?: string
 }
+/**
+ * Structured provider failure kept alongside `errorMessage` so the error card
+ * can classify the failure and show the raw body on demand. `responseBody` is
+ * truncated at capture time because it is persisted with the conversation.
+ */
+export type ChatErrorDetail = {
+  providerId?: string
+  status?: number
+  responseBody?: string
+}
+
 export type ChatAssistantMessage = {
   role: 'assistant'
   content: string
@@ -101,8 +116,10 @@ export type ChatAssistantMessage = {
     usage?: ResponseUsage
     model?: ChatModel // TODO: migrate legacy data to new model type
     durationMs?: number
+    reasoningDurationMs?: number
     generationState?: 'streaming' | 'completed' | 'aborted' | 'error'
     errorMessage?: string
+    errorDetail?: ChatErrorDetail
     llmDebugTraceId?: string
     providerMetadata?: ProviderMetadata
     sourceUserMessageId?: string
@@ -113,6 +130,8 @@ export type ChatAssistantMessage = {
     branchRunStatus?: 'idle' | 'running' | 'completed' | 'aborted' | 'error'
     branchWaitingApproval?: boolean
     sources?: CitationSource[]
+    /** CLI child activity owner; omitted for foreground assistant messages. */
+    cliSubagentParentCallId?: string
   }
 }
 export type ChatToolMessage = {
@@ -249,8 +268,10 @@ export type SerializedChatAssistantMessage = {
     usage?: ResponseUsage
     model?: ChatModel // TODO: migrate legacy data to new model type
     durationMs?: number
+    reasoningDurationMs?: number
     generationState?: 'streaming' | 'completed' | 'aborted' | 'error'
     errorMessage?: string
+    errorDetail?: ChatErrorDetail
     llmDebugTraceId?: string
     providerMetadata?: ProviderMetadata
     sourceUserMessageId?: string

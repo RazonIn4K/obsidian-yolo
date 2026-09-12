@@ -2,6 +2,7 @@ jest.mock('obsidian', () => ({
   TAbstractFile: class {},
   TFile: class {},
   TFolder: class {},
+  normalizePath: (path: string) => path,
 }))
 
 import type { YoloSettings } from '../../settings/schema/setting.types'
@@ -29,21 +30,32 @@ describe('RagAutoUpdateService', () => {
       ragOptions: {
         enabled: true,
         autoUpdateEnabled: true,
-        includePatterns: [],
-        excludePatterns: [],
         lastAutoUpdateAt: 0,
         indexPdf: true,
       },
+      knowledgeBases: [
+        { id: 'kb-a', name: 'kb-a', description: '', include: [], exclude: [] },
+      ],
     } as unknown as YoloSettings
-    const runIndex = jest.fn().mockResolvedValue(undefined)
+    let retryCount = 0
+    const runIndex = jest.fn().mockImplementation(async () => {
+      retryCount = 0
+    })
     const setSettings = jest.fn().mockResolvedValue(undefined)
-    const markRetryScheduled = jest.fn().mockResolvedValue(undefined)
+    const markRetryScheduled = jest
+      .fn()
+      .mockImplementation(
+        async (_kbId: string, { retryCount: nextRetryCount }) => {
+          retryCount = nextRetryCount
+        },
+      )
     const clearRetryScheduled = jest.fn().mockResolvedValue(undefined)
 
     const service = new RagAutoUpdateService({
       getSettings: () => settings,
       setSettings,
       runIndex,
+      getRetryCount: () => retryCount,
       markRetryScheduled,
       clearRetryScheduled,
     })
@@ -55,6 +67,9 @@ describe('RagAutoUpdateService', () => {
       setSettings,
       markRetryScheduled,
       clearRetryScheduled,
+      setRetryCount: (value: number) => {
+        retryCount = value
+      },
       cleanup: () => undefined,
     }
   }
@@ -128,6 +143,78 @@ describe('RagAutoUpdateService', () => {
     cleanup()
   })
 
+  it('tracks and flushes two differently-scoped knowledge bases independently', async () => {
+    // Each knowledge base gets its own RagAutoUpdateWorker keyed by kbId — a
+    // path that only matches one base's include/exclude scope must dirty
+    // (and later flush) only that base's worker, never the other's.
+    const settings = {
+      embeddingModelId: 'test-embed',
+      embeddingModels: [{ id: 'test-embed' }],
+      ragOptions: {
+        enabled: true,
+        autoUpdateEnabled: true,
+        lastAutoUpdateAt: 0,
+        indexPdf: true,
+      },
+      knowledgeBases: [
+        {
+          id: 'kb-a',
+          name: 'kb-a',
+          description: '',
+          include: ['FolderA'],
+          exclude: [],
+        },
+        {
+          id: 'kb-b',
+          name: 'kb-b',
+          description: '',
+          include: ['FolderB'],
+          exclude: [],
+        },
+      ],
+    } as unknown as YoloSettings
+    const retryCounts = new Map<string, number>()
+    const runIndex = jest.fn().mockResolvedValue(undefined)
+    const setSettings = jest.fn().mockResolvedValue(undefined)
+    const markRetryScheduled = jest.fn().mockResolvedValue(undefined)
+    const clearRetryScheduled = jest.fn().mockResolvedValue(undefined)
+
+    const service = new RagAutoUpdateService({
+      getSettings: () => settings,
+      setSettings,
+      runIndex,
+      getRetryCount: (kbId: string) => retryCounts.get(kbId) ?? 0,
+      markRetryScheduled,
+      clearRetryScheduled,
+    })
+
+    // Only kb-a's scope matches this path — kb-b's worker must stay idle.
+    service.onVaultPathChanged('FolderA/note.md')
+    jest.advanceTimersByTime(5 * 60_000)
+    await flushAsync()
+
+    expect(runIndex).toHaveBeenCalledTimes(1)
+    expect(runIndex).toHaveBeenCalledWith('kb-a', {
+      kind: 'paths',
+      paths: ['FolderA/note.md'],
+    })
+
+    runIndex.mockClear()
+
+    // Now a path only kb-b's scope matches — must flush kb-b alone.
+    service.onVaultPathChanged('FolderB/note.md')
+    jest.advanceTimersByTime(5 * 60_000)
+    await flushAsync()
+
+    expect(runIndex).toHaveBeenCalledTimes(1)
+    expect(runIndex).toHaveBeenCalledWith('kb-b', {
+      kind: 'paths',
+      paths: ['FolderB/note.md'],
+    })
+
+    service.cleanup()
+  })
+
   it('runs sooner when the window blurs after a short grace period', async () => {
     const { service, runIndex, cleanup } = createService()
 
@@ -172,7 +259,7 @@ describe('RagAutoUpdateService', () => {
   it('restores persisted retry schedule on startup', async () => {
     const { service, runIndex, cleanup } = createService()
 
-    service.restoreRetryScheduled(Date.now() + 5 * 60_000)
+    service.restoreRetryScheduled('kb-a', Date.now() + 5 * 60_000)
     jest.advanceTimersByTime(5 * 60_000)
     await flushAsync()
 
@@ -208,7 +295,7 @@ describe('RagAutoUpdateService', () => {
     cleanup()
   })
 
-  it('grows the retry delay exponentially and caps at 30 minutes', async () => {
+  it('stops after three automatic retries', async () => {
     const transientError = new Error('network timeout')
     const { service, runIndex, markRetryScheduled, cleanup } = createService()
     // Always fail transiently.
@@ -218,10 +305,8 @@ describe('RagAutoUpdateService', () => {
 
     const expectedDelaysMs = [
       5 * 60_000, // 5m
-      10 * 60_000, // 10m
-      20 * 60_000, // 20m
-      30 * 60_000, // capped at 30m
-      30 * 60_000, // still capped
+      15 * 60_000, // 15m
+      30 * 60_000, // 30m
     ]
 
     // Advance by the EDIT_IDLE_WINDOW first to trigger the initial run.
@@ -230,7 +315,7 @@ describe('RagAutoUpdateService', () => {
 
     for (let i = 0; i < expectedDelaysMs.length; i += 1) {
       const before = Date.now()
-      const lastCall = markRetryScheduled.mock.calls.at(-1)?.[0] as {
+      const lastCall = markRetryScheduled.mock.calls.at(-1)?.[1] as {
         retryAt: number
       }
       const observedDelay = lastCall.retryAt - before
@@ -242,24 +327,35 @@ describe('RagAutoUpdateService', () => {
       await flushAsync()
     }
 
+    expect(runIndex).toHaveBeenCalledTimes(4)
+    expect(markRetryScheduled).toHaveBeenCalledTimes(3)
+    jest.advanceTimersByTime(60 * 60_000)
+    await flushAsync()
+    expect(runIndex).toHaveBeenCalledTimes(4)
+    service.onVaultPathChanged('after-exhaustion.md')
+    jest.advanceTimersByTime(5 * 60_000)
+    await flushAsync()
+    expect(runIndex).toHaveBeenCalledTimes(4)
+
     cleanup()
   })
 
   it('resets the backoff counter after a successful run', async () => {
     const transientError = new Error('network timeout')
-    const { service, runIndex, markRetryScheduled, cleanup } = createService()
+    const { service, runIndex, markRetryScheduled, setRetryCount, cleanup } =
+      createService()
     runIndex
       .mockRejectedValueOnce(transientError) // run 1: fail (delay 5m)
-      .mockRejectedValueOnce(transientError) // run 2: fail (delay 10m)
-      .mockResolvedValueOnce(undefined) // run 3: success (reset)
+      .mockRejectedValueOnce(transientError) // run 2: fail (delay 15m)
+      .mockImplementationOnce(async () => setRetryCount(0)) // run 3: success
       .mockRejectedValueOnce(transientError) // run 5: fail again → delay 5m
 
     service.onVaultPathChanged('foo.md')
     jest.advanceTimersByTime(5 * 60_000)
     await flushAsync()
-    jest.advanceTimersByTime(5 * 60_000) // retry 1 fails → 10m
+    jest.advanceTimersByTime(5 * 60_000) // retry 1 fails → 15m
     await flushAsync()
-    jest.advanceTimersByTime(10 * 60_000) // retry 2 succeeds, counter reset
+    jest.advanceTimersByTime(15 * 60_000) // retry 2 succeeds, counter reset
     await flushAsync()
 
     // Cooldown is 2m after the successful run; a new edit + idle triggers run.
@@ -267,7 +363,7 @@ describe('RagAutoUpdateService', () => {
     jest.advanceTimersByTime(5 * 60_000)
     await flushAsync()
 
-    const lastCall = markRetryScheduled.mock.calls.at(-1)?.[0] as {
+    const lastCall = markRetryScheduled.mock.calls.at(-1)?.[1] as {
       retryAt: number
     }
     // Fresh failure after a success must restart at the base 5m delay.
@@ -275,7 +371,7 @@ describe('RagAutoUpdateService', () => {
     cleanup()
   })
 
-  it('resets the backoff counter after an aborted terminal run', async () => {
+  it('does not reset the retry budget after an aborted run', async () => {
     const transientError = new Error('network timeout')
     const abortError = Object.assign(new Error('Indexing cancelled by user'), {
       name: 'AbortError',
@@ -283,7 +379,7 @@ describe('RagAutoUpdateService', () => {
     const { service, runIndex, markRetryScheduled, cleanup } = createService()
     runIndex
       .mockRejectedValueOnce(transientError) // run 1: fail → backoff counter = 1 (delay 5m)
-      .mockRejectedValueOnce(abortError) // retry 1: aborted terminal → counter reset
+      .mockRejectedValueOnce(abortError) // retry 1: aborted without reset
       .mockRejectedValueOnce(transientError) // run after a new edit → fresh failure
 
     service.onVaultPathChanged('foo.md')
@@ -298,21 +394,20 @@ describe('RagAutoUpdateService', () => {
     jest.advanceTimersByTime(5 * 60_000)
     await flushAsync()
 
-    const lastCall = markRetryScheduled.mock.calls.at(-1)?.[0] as {
+    const lastCall = markRetryScheduled.mock.calls.at(-1)?.[1] as {
       retryAt: number
     }
-    // If the aborted run had not reset the counter, the delay would be 10m.
-    expect(lastCall.retryAt - Date.now()).toBe(5 * 60_000)
+    expect(lastCall.retryAt - Date.now()).toBe(15 * 60_000)
     cleanup()
   })
 
-  it('resets the backoff counter after an unknown terminal run', async () => {
+  it('does not reset the retry budget after an unknown terminal run', async () => {
     const transientError = new Error('network timeout')
     const unknownError = new Error('totally unexpected failure')
     const { service, runIndex, markRetryScheduled, cleanup } = createService()
     runIndex
       .mockRejectedValueOnce(transientError) // run 1: fail → backoff counter = 1 (delay 5m)
-      .mockRejectedValueOnce(unknownError) // retry 1: unknown terminal → counter reset, no retry
+      .mockRejectedValueOnce(unknownError) // retry 1: unknown terminal, no retry
       .mockRejectedValueOnce(transientError) // run after a new edit → fresh failure
 
     service.onVaultPathChanged('foo.md')
@@ -330,11 +425,10 @@ describe('RagAutoUpdateService', () => {
     jest.advanceTimersByTime(5 * 60_000)
     await flushAsync()
 
-    const lastCall = markRetryScheduled.mock.calls.at(-1)?.[0] as {
+    const lastCall = markRetryScheduled.mock.calls.at(-1)?.[1] as {
       retryAt: number
     }
-    // Unknown reset the counter, so the fresh transient failure restarts at 5m.
-    expect(lastCall.retryAt - Date.now()).toBe(5 * 60_000)
+    expect(lastCall.retryAt - Date.now()).toBe(15 * 60_000)
     cleanup()
   })
 
@@ -344,7 +438,7 @@ describe('RagAutoUpdateService', () => {
     // the full persisted delay.
     const { service, runIndex, cleanup } = createService()
 
-    service.restoreRetryScheduled(Date.now() + 30 * 60_000)
+    service.restoreRetryScheduled('kb-a', Date.now() + 30 * 60_000)
     // Nothing has fired yet (retry is 30m out).
     jest.advanceTimersByTime(60_000)
     await flushAsync()
@@ -373,12 +467,12 @@ describe('RagAutoUpdateService', () => {
     jest.advanceTimersByTime(5 * 60_000)
     await flushAsync()
 
-    expect(runIndex).toHaveBeenNthCalledWith(1, { kind: 'all' })
+    expect(runIndex).toHaveBeenNthCalledWith(1, 'kb-a', { kind: 'all' })
 
     jest.advanceTimersByTime(5 * 60_000)
     await flushAsync()
 
-    expect(runIndex).toHaveBeenNthCalledWith(2, { kind: 'all' })
+    expect(runIndex).toHaveBeenNthCalledWith(2, 'kb-a', { kind: 'all' })
     cleanup()
   })
 
@@ -393,16 +487,16 @@ describe('RagAutoUpdateService', () => {
       .mockRejectedValueOnce(transientError)
       .mockResolvedValueOnce(undefined)
 
-    service.restoreRetryScheduled(Date.now() + 5 * 60_000)
+    service.restoreRetryScheduled('kb-a', Date.now() + 5 * 60_000)
     jest.advanceTimersByTime(5 * 60_000)
     await flushAsync()
 
-    expect(runIndex).toHaveBeenNthCalledWith(1, { kind: 'all' })
+    expect(runIndex).toHaveBeenNthCalledWith(1, 'kb-a', { kind: 'all' })
 
     jest.advanceTimersByTime(5 * 60_000)
     await flushAsync()
 
-    expect(runIndex).toHaveBeenNthCalledWith(2, { kind: 'all' })
+    expect(runIndex).toHaveBeenNthCalledWith(2, 'kb-a', { kind: 'all' })
     cleanup()
   })
 

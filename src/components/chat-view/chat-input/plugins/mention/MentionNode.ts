@@ -228,6 +228,14 @@ export class MentionNode extends TextNode {
   getMentionable(): SerializedMentionable {
     return this.__mentionable
   }
+
+  updateMentionName(mentionName: string): void {
+    if (this.__mentionName === mentionName) return
+
+    const writable = this.getWritable()
+    writable.__mentionName = mentionName
+    writable.setTextContent(getDisplayMentionName(mentionName))
+  }
 }
 
 function compactInlineMentionable(
@@ -254,6 +262,11 @@ function compactInlineMentionable(
     contentUnit: mentionable.contentUnit,
     tableRowCount: mentionable.tableRowCount,
     tableColumnCount: mentionable.tableColumnCount,
+    // Identity-bearing for PDF annotations: `getMentionableKey` folds
+    // `annotationNumber` into the block key, so dropping it here would make
+    // the compacted token's key disagree with the one computed from chat
+    // state — which reads as a dangling pasted block reference.
+    annotationNumber: mentionable.annotationNumber,
   }
 }
 

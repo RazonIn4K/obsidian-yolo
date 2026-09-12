@@ -1,29 +1,12 @@
 import { requestUrl } from 'obsidian'
 
+import type { DistributionFeedClient } from '../distribution/distributionFeedClient'
+
 const GITHUB_RELEASES_URL =
   'https://api.github.com/repos/Lapis0x0/obsidian-yolo/releases'
 
 const GITHUB_RELEASE_DOWNLOAD_BASE =
   'https://github.com/Lapis0x0/obsidian-yolo/releases/download'
-
-const GITHUB_RELEASE_PAGE_BASE =
-  'https://github.com/Lapis0x0/obsidian-yolo/releases/tag'
-
-const GITHUB_VERSIONS_URL =
-  'https://raw.githubusercontent.com/Lapis0x0/obsidian-yolo/main/versions.json'
-
-const GITHUB_LATEST_RELEASE_NOTE_URL =
-  'https://raw.githubusercontent.com/Lapis0x0/obsidian-yolo/main/latest-release-note.md'
-
-const LATEST_RELEASE_NOTE_RETRY_DELAYS_MS = [800, 2000] as const
-
-function releaseTagUrl(version: string): string {
-  return `${GITHUB_RELEASES_URL}/tags/${encodeURIComponent(version)}`
-}
-
-function releasePageUrl(version: string): string {
-  return `${GITHUB_RELEASE_PAGE_BASE}/${encodeURIComponent(version)}`
-}
 
 /** Matches the UI page size and GitHub `per_page` for on-demand loading. */
 export const RELEASE_HISTORY_PAGE_SIZE = 10
@@ -34,6 +17,8 @@ export type ReleaseNotesByLanguage = {
 }
 
 export type ReleaseHistoryEntry = {
+  productId: string
+  productName: string
   version: string
   releaseNotes: ReleaseNotesByLanguage
   releaseUrl: string
@@ -48,6 +33,8 @@ export type ReleaseHistoryPageResult = {
 export type ReleaseAssetMeta = {
   url: string
   size: number
+  mirrorUrl?: string
+  sha256?: string
 }
 
 export type ReleaseAssets = {
@@ -55,9 +42,6 @@ export type ReleaseAssets = {
   manifestJson: ReleaseAssetMeta
   stylesCss: ReleaseAssetMeta
 }
-
-/** @deprecated Use ReleaseAssets */
-export type ReleaseAssetUrls = ReleaseAssets
 
 export type UpdateCheckResult = {
   hasUpdate: boolean
@@ -127,7 +111,11 @@ export async function locateReleaseHistoryPage(
     const pageIndex = githubPage - 1
     pageCache.set(pageIndex, fetched)
 
-    if (fetched.entries.some((entry) => entry.version === normalized)) {
+    if (
+      fetched.entries.some(
+        (entry) => entry.productId === 'core' && entry.version === normalized,
+      )
+    ) {
       return { pageIndex, pageCache, found: true }
     }
 
@@ -165,33 +153,6 @@ export function compareVersions(current: string, latest: string): boolean {
   return false
 }
 
-function isPluginVersion(version: string): boolean {
-  return /^v?\d+(?:\.\d+)*$/i.test(version.trim())
-}
-
-export function parseLatestVersionFromVersionsJson(raw: string): string | null {
-  try {
-    const parsed = JSON.parse(raw) as unknown
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return null
-    }
-
-    let latestVersion: string | null = null
-    for (const version of Object.keys(parsed)) {
-      if (!isPluginVersion(version)) {
-        continue
-      }
-      const normalized = normalizePluginVersion(version)
-      if (!latestVersion || compareVersions(latestVersion, normalized)) {
-        latestVersion = normalized
-      }
-    }
-    return latestVersion
-  } catch {
-    return null
-  }
-}
-
 export function parseReleaseNoteVersion(markdown: string): string | null {
   for (const raw of markdown.split('\n')) {
     const line = raw.trim()
@@ -202,81 +163,6 @@ export function parseReleaseNoteVersion(markdown: string): string | null {
     return match ? normalizePluginVersion(match[1]) : null
   }
   return null
-}
-
-async function fetchLatestReleaseNotes(
-  latestVersion: string,
-): Promise<ReleaseNotesByLanguage> {
-  const empty = { en: null, zh: null }
-
-  let lastFailureReason = 'unknown error'
-  const attempts = LATEST_RELEASE_NOTE_RETRY_DELAYS_MS.length + 1
-
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const result = await fetchLatestReleaseNotesOnce(latestVersion)
-    if (result.ok) {
-      return result.releaseNotes
-    }
-
-    lastFailureReason = result.reason
-    const retryDelayMs = LATEST_RELEASE_NOTE_RETRY_DELAYS_MS[attempt]
-    if (retryDelayMs !== undefined) {
-      await delay(retryDelayMs)
-    }
-  }
-
-  console.warn(
-    `[YOLO] Plugin update release note fetch failed after ${attempts} attempts: ${lastFailureReason}`,
-  )
-  return empty
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    globalThis.setTimeout(resolve, ms)
-  })
-}
-
-type LatestReleaseNotesFetchResult =
-  | { ok: true; releaseNotes: ReleaseNotesByLanguage }
-  | { ok: false; reason: string }
-
-async function fetchLatestReleaseNotesOnce(
-  latestVersion: string,
-): Promise<LatestReleaseNotesFetchResult> {
-  const normalizedLatestVersion = normalizePluginVersion(latestVersion)
-
-  try {
-    const response = await requestUrl({
-      url: GITHUB_LATEST_RELEASE_NOTE_URL,
-      method: 'GET',
-    })
-
-    if (response.status < 200 || response.status >= 300) {
-      return {
-        ok: false,
-        reason: `latest-release-note.md returned HTTP ${response.status}.`,
-      }
-    }
-
-    const body = response.text.trim()
-    if (!body) {
-      return { ok: false, reason: 'latest-release-note.md is empty.' }
-    }
-
-    const noteVersion = parseReleaseNoteVersion(body)
-    if (noteVersion !== normalizedLatestVersion) {
-      return {
-        ok: false,
-        reason: `latest-release-note.md version ${noteVersion ?? 'unknown'} does not match ${normalizedLatestVersion}.`,
-      }
-    }
-
-    return { ok: true, releaseNotes: splitReleaseNotesByLanguage(body) }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return { ok: false, reason: message }
-  }
 }
 
 /**
@@ -399,9 +285,10 @@ function parseChangelogItem(text: string): ChangelogItem {
  * update toast renders (Direction 1 / "Cursor minimal card" design): a subtitle
  * plus tone-tagged sections of bullet items. The repo authors release notes in a
  * stable shape — a `##` title heading, `### {emoji} {name}` section headings, and
- * `- **Title (#ref)**: body` bullets — so this maps directly. Content that
- * appears before the first section is gathered into an unnamed leading section so
- * nothing is dropped if the format drifts.
+ * `- **Title (#ref)**: body` bullets — so this maps directly. A paragraph is
+ * read as one more item of the section it sits in, and anything before the
+ * first section opens an unnamed leading section, so a note that leads with a
+ * plain sentence still reaches the reader instead of being dropped.
  */
 export function parseChangelog(markdown: string): ParsedChangelog {
   let subtitle: string | null = null
@@ -429,14 +316,16 @@ export function parseChangelog(markdown: string): ParsedChangelog {
       continue
     }
 
+    // The GitHub Release body carries a `<!-- core-release-owner -->` marker
+    // the reader must never see.
+    if (line.startsWith('<!--')) continue
+
     const bullet = line.match(/^[-*]\s+(.*)$/)
-    if (bullet) {
-      if (!current) {
-        current = { tone: 'accent', emoji: null, name: '', items: [] }
-        sections.push(current)
-      }
-      current.items.push(parseChangelogItem(bullet[1]))
+    if (!current) {
+      current = { tone: 'accent', emoji: null, name: '', items: [] }
+      sections.push(current)
     }
+    current.items.push(parseChangelogItem(bullet ? bullet[1] : line))
   }
 
   return { subtitle, sections }
@@ -524,56 +413,6 @@ export function parseReleaseAssets(
   return { mainJs, manifestJson, stylesCss }
 }
 
-/** @deprecated Use parseReleaseAssets */
-export function parseReleaseAssetUrls(
-  assets: GitHubReleaseAsset[] | undefined,
-): ReleaseAssets | null {
-  return parseReleaseAssets(assets)
-}
-
-/**
- * Fetches a specific GitHub release by tag/version. Returns null on failure.
- */
-export async function fetchReleaseByVersion(version: string): Promise<{
-  version: string
-  releaseUrl: string
-  assets: ReleaseAssets | null
-} | null> {
-  const normalized = normalizePluginVersion(version)
-  if (!normalized) {
-    return null
-  }
-
-  try {
-    const response = await requestUrl({
-      url: releaseTagUrl(normalized),
-      method: 'GET',
-      headers: {
-        Accept: 'application/vnd.github+json',
-      },
-    })
-
-    if (response.status < 200 || response.status >= 300) {
-      return null
-    }
-
-    const data = JSON.parse(response.text) as GitHubReleaseResponse
-    const tag = typeof data.tag_name === 'string' ? data.tag_name : ''
-    const releaseVersion = stripVersionPrefix(tag)
-    if (!releaseVersion) {
-      return null
-    }
-
-    return {
-      version: releaseVersion,
-      releaseUrl: typeof data.html_url === 'string' ? data.html_url : '',
-      assets: parseReleaseAssets(data.assets),
-    }
-  } catch {
-    return null
-  }
-}
-
 /**
  * Fetches the latest published version from the repo's static Obsidian
  * `versions.json` file and compares it to `currentVersion`.
@@ -581,44 +420,47 @@ export async function fetchReleaseByVersion(version: string): Promise<{
  */
 export async function checkForUpdate(
   currentVersion: string,
+  feedClient: Pick<DistributionFeedClient, 'loadFresh'>,
 ): Promise<UpdateCheckResult | null> {
   try {
-    const response = await requestUrl({
-      url: GITHUB_VERSIONS_URL,
-      method: 'GET',
-    })
-
-    if (response.status < 200 || response.status >= 300) {
-      console.warn(
-        `[YOLO] Plugin update check failed: versions.json returned HTTP ${response.status}.`,
-      )
-      return null
-    }
-
-    const latestVersion = parseLatestVersionFromVersionsJson(response.text)
-    if (!latestVersion) {
-      console.warn(
-        '[YOLO] Plugin update check failed: versions.json does not contain a valid version.',
-      )
-      return null
-    }
-
+    const core = (await feedClient.loadFresh()).core
+    const latestVersion = core.version
     const hasUpdate = compareVersions(currentVersion, latestVersion)
-    const releaseNotes = hasUpdate
-      ? await fetchLatestReleaseNotes(latestVersion)
+    const releaseNotes: ReleaseNotesByLanguage = hasUpdate
+      ? core.releaseNotes
       : { en: null, zh: null }
 
     return {
       hasUpdate,
       latestVersion,
       releaseNotes,
-      releaseUrl: releasePageUrl(latestVersion),
-      assets: buildReleaseAssets(latestVersion),
+      releaseUrl: core.releaseUrl,
+      assets: {
+        mainJs: feedReleaseAsset(core.assets.mainJs),
+        manifestJson: feedReleaseAsset(core.assets.manifestJson),
+        stylesCss: feedReleaseAsset(core.assets.stylesCss),
+      },
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     console.warn(`[YOLO] Plugin update check failed: ${message}`)
     return null
+  }
+}
+
+function feedReleaseAsset(
+  asset: Readonly<{
+    canonicalUrl: string
+    mirrorPath: string
+    byteSize: number
+    sha256: string
+  }>,
+): ReleaseAssetMeta {
+  return {
+    url: asset.canonicalUrl,
+    mirrorUrl: `https://updates.yoloapp.dev/${asset.mirrorPath}`,
+    size: asset.byteSize,
+    sha256: asset.sha256,
   }
 }
 
@@ -669,14 +511,14 @@ function parseReleaseHistoryEntries(
     }
 
     const tag = typeof release.tag_name === 'string' ? release.tag_name : ''
-    const version = stripVersionPrefix(tag)
-    if (!version) {
-      continue
-    }
+    const product = parseProductReleaseTag(tag)
+    if (!product) continue
 
     const body = typeof release.body === 'string' ? release.body : ''
     entries.push({
-      version,
+      productId: product.id,
+      productName: product.name,
+      version: product.version,
       releaseNotes: body
         ? splitReleaseNotesByLanguage(body)
         : { en: null, zh: null },
@@ -686,4 +528,23 @@ function parseReleaseHistoryEntries(
     })
   }
   return entries
+}
+
+function parseProductReleaseTag(
+  tag: string,
+): Readonly<{ id: string; name: string; version: string }> | null {
+  const core = normalizePluginVersion(tag)
+  if (/^\d+(?:\.\d+){2,3}$/.test(core)) {
+    return { id: 'core', name: 'YOLO Core', version: core }
+  }
+  const module = tag.match(
+    /^([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\/v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/,
+  )
+  if (!module) return null
+  const id = module[1]
+  return {
+    id,
+    name: id === 'learning' ? 'Learning' : id,
+    version: module[2],
+  }
 }

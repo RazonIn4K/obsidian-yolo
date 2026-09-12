@@ -3,17 +3,31 @@ import React, { useCallback, useMemo, useState } from 'react'
 
 import { ReactModal } from '../../../components/common/ReactModal'
 import { useLanguage } from '../../../contexts/language-context'
-import YoloPlugin from '../../../main'
+import type { ModuleDataEnvelope } from '../../../core/modules/moduleSettingsStore'
+import { writeObsidianModuleConfigEnvelopes } from '../../../core/modules/obsidianModuleConfigBackend'
+import { MODULE_CONFIG_TRANSFER_KEY } from '../../../core/persistence/persistentDataRegistry'
+import type YoloPlugin from '../../../main'
+import { migrateYoloSettingsData } from '../../../settings/schema/settings'
 import { EXCLUDED_KEYS, EXPORTABLE_CONFIG_KEYS } from '../config-keys'
 import {
   ImportValidationError,
+  ModuleConfigImportPartialError,
   applyImport,
   parseVaultData,
   renderImportError,
   validateExportFile,
 } from '../import-config'
 import { hasNonEmptyCredentials } from '../redact'
-import { ConfigExportFile, MergeStrategy } from '../types'
+import {
+  ConfigExportFile,
+  MODULE_CONFIG_EXPORT_FORMAT_VERSION,
+  MODULE_CONFIG_EXPORT_SCHEMA,
+  MergeStrategy,
+} from '../types'
+import {
+  collectVaultModuleConfigs,
+  findRootVaultDataJson,
+} from '../vault-module-configs'
 
 type ImportConfigModalComponentProps = {
   plugin: YoloPlugin
@@ -45,132 +59,164 @@ function ImportConfigModalComponent({
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
   const [mergeStrategy, setMergeStrategy] = useState<MergeStrategy>('overwrite')
 
-  const handleFileImport = useCallback(() => {
-    const input = document.createElement('input')
-    input.type = 'file'
-    input.accept = '.json'
-    input.onchange = async (e) => {
-      const file = (e.target as HTMLInputElement).files?.[0]
-      if (!file) return
+  // 设置页在 Obsidian 1.13+ 是独立窗口；文件选择器的用户激活按窗口计，
+  // input 必须建在按钮所在窗口的 document 上，否则 click() 被静默拦截。
+  const handleFileImport = useCallback(
+    (e: React.MouseEvent<HTMLButtonElement>) => {
+      const input = e.currentTarget.ownerDocument.createElement('input')
+      input.type = 'file'
+      input.accept = '.json'
+      input.onchange = async (e) => {
+        const file = (e.target as HTMLInputElement).files?.[0]
+        if (!file) return
 
-      try {
-        const text = await file.text()
-        let raw: unknown
         try {
-          raw = JSON.parse(text)
+          const text = await file.text()
+          let raw: unknown
+          try {
+            raw = JSON.parse(text)
+          } catch {
+            new Notice(
+              t(
+                'configTransfer.import.noticeInvalidJson',
+                '文件不是有效的 JSON 格式，请确认选择了正确的配置文件。',
+              ),
+              5000,
+            )
+            return
+          }
+          const result = await validateExportFile(raw)
+          if (!result.valid) {
+            new Notice(renderImportError(result, t), 5000)
+            return
+          }
+          setImportData(result.data)
+          setSelectedKeys(new Set(result.data.keys))
+          setStep('select')
+          if (result.data.redacted) {
+            new Notice(
+              t(
+                'configTransfer.import.noticeRedactedHint',
+                '注意：该配置为脱敏导出，所有 API Key / 密码 / Header / 环境变量已被清空，需导入后手动补填。',
+              ),
+              5000,
+            )
+          }
         } catch {
           new Notice(
             t(
-              'configTransfer.import.noticeInvalidJson',
-              '文件不是有效的 JSON 格式，请确认选择了正确的配置文件。',
+              'configTransfer.import.noticeFileReadFailed',
+              '文件读取失败，请重试。',
             ),
             5000,
           )
-          return
         }
-        const result = await validateExportFile(raw)
-        if (!result.valid) {
-          new Notice(renderImportError(result, t), 5000)
-          return
-        }
-        setImportData(result.data)
-        setSelectedKeys(new Set(result.data.keys))
-        setStep('select')
-        if (result.data.redacted) {
+      }
+      input.click()
+    },
+    [t],
+  )
+
+  const handleVaultImport = useCallback(
+    (e: React.MouseEvent<HTMLButtonElement>) => {
+      const input = e.currentTarget.ownerDocument.createElement('input')
+      input.type = 'file'
+      input.setAttribute('webkitdirectory', '')
+      input.setAttribute('directory', '')
+      input.onchange = async (e) => {
+        const files = (e.target as HTMLInputElement).files
+        if (!files || files.length === 0) return
+
+        const selectedFiles = Array.from(files)
+        const dataJsonFile = findRootVaultDataJson(selectedFiles)
+
+        if (!dataJsonFile) {
           new Notice(
             t(
-              'configTransfer.import.noticeRedactedHint',
-              '注意：该配置为脱敏导出，所有 API Key / 密码 / Header / 环境变量已被清空，需导入后手动补填。',
+              'configTransfer.import.noticePluginNotFound',
+              '未在该目录找到 YOLO 插件配置',
             ),
             5000,
           )
+          return
         }
-      } catch {
-        new Notice(
-          t(
-            'configTransfer.import.noticeFileReadFailed',
-            '文件读取失败，请重试。',
-          ),
-          5000,
-        )
-      }
-    }
-    input.click()
-  }, [t])
 
-  const handleVaultImport = useCallback(() => {
-    const input = document.createElement('input')
-    input.type = 'file'
-    input.setAttribute('webkitdirectory', '')
-    input.setAttribute('directory', '')
-    input.onchange = async (e) => {
-      const files = (e.target as HTMLInputElement).files
-      if (!files || files.length === 0) return
-
-      let dataJsonFile: File | null = null
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i]
-        const relativePath = file.webkitRelativePath
-        // 在外部笔记库中查找 YOLO 配置文件，需要匹配常见的配置目录名
-        /* eslint-disable obsidianmd/hardcoded-config-path */
-        const configDirPatterns = [
-          '.obsidian/plugins/yolo/data.json',
-          '.obsidian/plugins/obsidian-yolo/data.json',
-        ]
-        /* eslint-enable obsidianmd/hardcoded-config-path */
-        if (
-          configDirPatterns.some((pattern) => relativePath.includes(pattern))
-        ) {
-          dataJsonFile = file
-          break
-        }
-      }
-
-      if (!dataJsonFile) {
-        new Notice(
-          t(
-            'configTransfer.import.noticePluginNotFound',
-            '未在该目录找到 YOLO 插件配置',
-          ),
-          5000,
-        )
-        return
-      }
-
-      try {
-        const text = await dataJsonFile.text()
-        let raw: unknown
         try {
-          raw = JSON.parse(text)
-        } catch {
-          new Notice(
-            t(
-              'configTransfer.import.noticeInvalidJson',
-              '配置文件不是有效的 JSON 格式',
-            ),
-            5000,
+          const text = await dataJsonFile.text()
+          let raw: unknown
+          try {
+            raw = JSON.parse(text)
+          } catch {
+            new Notice(
+              t(
+                'configTransfer.import.noticeInvalidJson',
+                '配置文件不是有效的 JSON 格式',
+              ),
+              5000,
+            )
+            return
+          }
+          const parsed = parseVaultData(raw, plugin.manifest.version)
+          if (!parsed.valid) {
+            new Notice(renderImportError(parsed, t), 5000)
+            return
+          }
+          const migrated = migrateYoloSettingsData(
+            raw as Record<string, unknown>,
           )
-          return
+          let moduleConfigs: Record<string, ModuleDataEnvelope>
+          try {
+            moduleConfigs = await collectVaultModuleConfigs(
+              selectedFiles,
+              dataJsonFile.webkitRelativePath,
+              migrated,
+            )
+          } catch (error) {
+            throw new ImportValidationError(
+              'errorTampered',
+              error instanceof Error ? error.message : String(error),
+            )
+          }
+          const result: { valid: true; data: ConfigExportFile } =
+            Object.keys(moduleConfigs).length === 0
+              ? parsed
+              : {
+                  valid: true as const,
+                  data: {
+                    ...parsed.data,
+                    $schema: MODULE_CONFIG_EXPORT_SCHEMA,
+                    formatVersion: MODULE_CONFIG_EXPORT_FORMAT_VERSION,
+                    keys: [...parsed.data.keys, MODULE_CONFIG_TRANSFER_KEY],
+                    data: {
+                      ...parsed.data.data,
+                      [MODULE_CONFIG_TRANSFER_KEY]: moduleConfigs,
+                    },
+                    checksum: '',
+                  },
+                }
+          setImportData(result.data)
+          setSelectedKeys(
+            new Set(result.data.keys.filter((k) => !EXCLUDED_KEYS.has(k))),
+          )
+          setStep('select')
+        } catch (error) {
+          if (error instanceof ImportValidationError) {
+            new Notice(renderImportError(error, t), 8000)
+          } else {
+            new Notice(
+              t(
+                'configTransfer.import.noticeFileReadFailed',
+                '配置文件读取失败',
+              ),
+              5000,
+            )
+          }
         }
-        const result = parseVaultData(raw, plugin.manifest.version)
-        if (!result.valid) {
-          new Notice(renderImportError(result, t), 5000)
-          return
-        }
-        setImportData(result.data)
-        setSelectedKeys(
-          new Set(result.data.keys.filter((k) => !EXCLUDED_KEYS.has(k))),
-        )
-        setStep('select')
-      } catch {
-        new Notice(
-          t('configTransfer.import.noticeFileReadFailed', '配置文件读取失败'),
-          5000,
-        )
       }
-    }
-    input.click()
-  }, [plugin, t])
+      input.click()
+    },
+    [plugin, t],
+  )
 
   const toggleKey = (key: string) => {
     setSelectedKeys((prev) => {
@@ -214,7 +260,31 @@ function ImportConfigModalComponent({
         mergeStrategy,
       })
 
-      await plugin.setSettings(result)
+      const saved = await plugin.setSettings(result)
+      if (!saved) return
+
+      if (selectedKeys.has(MODULE_CONFIG_TRANSFER_KEY)) {
+        const moduleConfigs = importData.data[MODULE_CONFIG_TRANSFER_KEY]
+        if (
+          moduleConfigs === null ||
+          typeof moduleConfigs !== 'object' ||
+          Array.isArray(moduleConfigs)
+        ) {
+          throw new Error('模块配置文件格式无效')
+        }
+        // Host settings are committed first so this resolves the final
+        // baseDir. Module writes are individually verified, but cannot be
+        // atomic with data.json; a later failure is surfaced as partial import.
+        try {
+          await writeObsidianModuleConfigEnvelopes(
+            plugin.app,
+            plugin.settings,
+            moduleConfigs as Record<string, ModuleDataEnvelope>,
+          )
+        } catch (error) {
+          throw new ModuleConfigImportPartialError(error)
+        }
+      }
       new Notice(t('configTransfer.import.noticeSuccess', '配置导入成功'))
 
       if (importData.redacted) {
@@ -234,6 +304,16 @@ function ImportConfigModalComponent({
         'configTransfer.import.noticeFailed',
         '配置导入失败',
       )
+      if (err instanceof ModuleConfigImportPartialError) {
+        new Notice(
+          t(
+            'configTransfer.import.noticePartialModuleConfig',
+            'Host 配置已导入，但模块配置导入失败；部分模块配置可能已写入，未自动回滚。',
+          ),
+          8000,
+        )
+        return
+      }
       if (err instanceof ImportValidationError) {
         const reason = renderImportError(err, t)
         const detail =

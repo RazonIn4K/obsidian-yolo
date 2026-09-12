@@ -10,18 +10,18 @@ import type {
 import { ToolCallResponseStatus } from '../../../types/tool-call.types'
 import { collectTotalAssistantUsage } from '../../../utils/chat/llmUsage'
 import { formatErrorMessageWithCauses } from '../../../utils/error-message'
+import { runWithBackgroundExecution } from '../../background/backgroundExecutionController'
 import type { BaseLLMProvider } from '../../llm/base'
 import { type YoloAgentEvent, conversationStateToEvents } from '../agent-api'
 import { backgroundTaskCompletionBus } from '../background-task/completion-bus'
-import { CitationRegistry } from '../citationRegistry'
 import { liveTaskStreamBus } from '../live-stream/taskStreamBus'
 import { NativeAgentRuntime } from '../native-runtime'
 import type { AgentConversationState } from '../service'
 import type { AgentRuntimeLoopConfig, AgentRuntimeRunInput } from '../types'
 
 import {
-  SUBAGENT_DEFAULT_SYSTEM_PROMPT,
   SUBAGENT_MAX_AUTO_ITERATIONS,
+  buildSubagentSystemPrompt,
 } from './constants'
 import type { SubagentParentContext } from './parent-context'
 import { subagentRuntimeRegistry } from './runtime-registry'
@@ -249,7 +249,6 @@ async function runChildAgent(
   }
 
   const runtime = new NativeAgentRuntime(loopConfig)
-  const citationRegistry = new CitationRegistry()
   const abortController = record.abortController
   const parentToolCallId = record.source.toolCallId
   const activityLines: string[] = []
@@ -279,17 +278,23 @@ async function runChildAgent(
     mcpManager: parent.mcpManager,
     allowedToolNames: childAllowedToolNames,
     toolPreferences: parent.toolPreferences,
+    builtinCapabilityPreferences: parent.builtinCapabilityPreferences,
     toolServerPreferences: parent.toolServerPreferences,
     workspaceScope: parent.workspaceScope,
     allowedSkillPaths: parent.allowedSkillPaths,
-    enableToolDisclosure: parent.enableToolDisclosure,
     reasoningLevel: parent.reasoningLevel,
     requestParams: parent.requestParams,
     abortSignal: abortController.signal,
-    systemPromptOverride: SUBAGENT_DEFAULT_SYSTEM_PROMPT,
+    systemPromptOverride: buildSubagentSystemPrompt(
+      parent.modeEnvironmentPrompt,
+    ),
     toolApprovalConversationId: parent.conversationId,
     bypassToolApproval: parent.bypassToolApproval,
-    runContext: { citationRegistry },
+    capabilityOverrides: parent.capabilityOverrides,
+    vaultPathBoundary: parent.vaultPathBoundary,
+    // Not `modeEnvironmentPrompt` as well: it is already folded into the
+    // override above, and the section pipeline is skipped for this run.
+    runtimeMode: parent.runtimeMode,
   }
 
   const unsubscribe = runtime.subscribe((snapshot) => {
@@ -321,7 +326,7 @@ async function runChildAgent(
 
   // While the runtime is paused on a PendingApproval tool call, this promise
   // gates the next loop iteration. Resolved by `resumeRun` (called from
-  // `AgentService.approveToolCall` / `rejectToolCall` after they patch the
+  // `AgentSessionService.approveToolCall` / `rejectToolCall` after they patch the
   // runtime's tool call response). Recreated for each pause so multiple
   // sequential approvals work.
   let approvalResolver: (() => void) | null = null
@@ -358,7 +363,7 @@ async function runChildAgent(
   try {
     let nextRunInput: AgentRuntimeRunInput = runInput
     while (true) {
-      await runtime.run(nextRunInput)
+      await runWithBackgroundExecution(() => runtime.run(nextRunInput))
       const snapshotAfterRun = runtime.getSnapshot()
       if (
         abortController.signal.aborted ||

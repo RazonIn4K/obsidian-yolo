@@ -29,13 +29,16 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLanguage } from '../../../contexts/language-context'
 import { useSettings } from '../../../contexts/settings-context'
 import { getEmbeddingModelClient } from '../../../core/rag/embedding'
-import YoloPlugin from '../../../main'
+import type YoloPlugin from '../../../main'
 import { ChatModel } from '../../../types/chat-model.types'
 import { EmbeddingModel } from '../../../types/embedding-model.types'
 import { LLMProvider } from '../../../types/provider.types'
 import { resolveProviderDisplayBaseUrl } from '../../../utils/llm/provider-base-url'
 import { providerSupportsEmbedding } from '../../../utils/llm/provider-config'
+import { openExternalLink } from '../../../utils/openExternalLink'
 import { ObsidianButton } from '../../common/ObsidianButton'
+import { ObsidianSetting } from '../../common/ObsidianSetting'
+import { ObsidianTextInput } from '../../common/ObsidianTextInput'
 import { ObsidianToggle } from '../../common/ObsidianToggle'
 import { AddChatModelModal } from '../modals/AddChatModelModal'
 import { AddEmbeddingModelModal } from '../modals/AddEmbeddingModelModal'
@@ -95,9 +98,15 @@ function ChatGPTOAuthPanel({
   const [connected, setConnected] = useState(false)
   const [accountId, setAccountId] = useState<string | null>(null)
   const [expiresAt, setExpiresAt] = useState<number | null>(null)
-  const [isConnecting, setIsConnecting] = useState(false)
-  const [pendingCode, setPendingCode] = useState<string | null>(null)
+  const [connectingMethod, setConnectingMethod] = useState<
+    'browser' | 'device' | null
+  >(null)
+  const [deviceAuthorization, setDeviceAuthorization] = useState<{
+    userCode: string
+    verificationUri: string
+  } | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const connectionAttemptRef = useRef(0)
 
   const refreshStatus = useCallback(async () => {
     setLoading(true)
@@ -119,51 +128,175 @@ function ChatGPTOAuthPanel({
   useEffect(() => {
     void refreshStatus()
     return () => {
+      connectionAttemptRef.current += 1
       abortRef.current?.abort()
+      plugin
+        .getChatGPTOAuthService(provider.id)
+        .cancelPendingBrowserAuthorization()
     }
-  }, [refreshStatus])
+  }, [plugin, provider.id, refreshStatus])
 
-  const handleConnect = () => {
+  const handleBrowserConnect = () => {
+    const attemptId = ++connectionAttemptRef.current
     const execute = async () => {
-      setIsConnecting(true)
+      setConnectingMethod('browser')
       const service = plugin.getChatGPTOAuthService(provider.id)
       const authorization = await service.beginBrowserAuthorization()
-      setPendingCode(null)
-      window.open(
-        authorization.authorizationUrl,
-        '_blank',
-        'noopener,noreferrer',
+      setDeviceAuthorization(null)
+      openExternalLink(authorization.authorizationUrl)
+      new Notice(
+        t(
+          'settings.providers.chatgptOAuthBrowserOpened',
+          'ChatGPT login opened in your browser. Complete authorization there.',
+        ),
+        8000,
       )
-      new Notice('已打开 ChatGPT OAuth 登录页面，请在浏览器中完成授权。', 8000)
       await authorization.complete
-      new Notice('ChatGPT OAuth 连接成功')
+      new Notice(
+        t(
+          'settings.providers.chatgptOAuthConnectedNotice',
+          'ChatGPT OAuth connected.',
+        ),
+      )
       await refreshStatus()
     }
 
     void execute()
       .catch((error: unknown) => {
+        if (connectionAttemptRef.current !== attemptId) {
+          return
+        }
         console.error('[YOLO] Failed to connect ChatGPT OAuth:', error)
         const message =
           error instanceof Error
             ? error.message
             : 'Failed to connect ChatGPT OAuth.'
-        new Notice(message)
+        const portFallback = message.includes(
+          'Failed to start local OAuth callback server',
+        )
+          ? `\n${t(
+              'settings.providers.chatgptOAuthPortFallback',
+              'Use device code login instead; it does not require a local port.',
+            )}`
+          : ''
+        new Notice(`${message}${portFallback}`)
       })
       .finally(() => {
-        setIsConnecting(false)
+        if (connectionAttemptRef.current === attemptId) {
+          setConnectingMethod(null)
+        }
+      })
+  }
+
+  const handleDeviceConnect = () => {
+    const attemptId = ++connectionAttemptRef.current
+    let activeAbortController: AbortController | null = null
+    const execute = async () => {
+      setConnectingMethod('device')
+      const service = plugin.getChatGPTOAuthService(provider.id)
+      const authorization = await service.beginDeviceAuthorization()
+      setDeviceAuthorization({
+        userCode: authorization.userCode,
+        verificationUri: authorization.verificationUri,
+      })
+
+      abortRef.current?.abort()
+      const abortController = new AbortController()
+      activeAbortController = abortController
+      abortRef.current = abortController
+      openExternalLink(authorization.verificationUri)
+      new Notice(
+        t(
+          'settings.providers.chatgptOAuthDeviceOpened',
+          'Enter the displayed device code on the ChatGPT authorization page.',
+        ),
+        10000,
+      )
+
+      await service.pollDeviceAuthorization(
+        authorization,
+        abortController.signal,
+      )
+      setDeviceAuthorization(null)
+      new Notice(
+        t(
+          'settings.providers.chatgptOAuthConnectedNotice',
+          'ChatGPT OAuth connected.',
+        ),
+      )
+      await refreshStatus()
+    }
+
+    void execute()
+      .catch((error: unknown) => {
+        if (connectionAttemptRef.current !== attemptId) {
+          return
+        }
+        if (error instanceof Error && error.name === 'AbortError') {
+          return
+        }
+        console.error(
+          '[YOLO] Failed to connect ChatGPT OAuth with device code:',
+          error,
+        )
+        new Notice(
+          error instanceof Error
+            ? error.message
+            : 'Failed to connect ChatGPT OAuth with device code.',
+        )
+      })
+      .finally(() => {
+        if (abortRef.current === activeAbortController) {
+          abortRef.current = null
+        }
+        if (connectionAttemptRef.current === attemptId) {
+          setDeviceAuthorization(null)
+          setConnectingMethod(null)
+        }
+      })
+  }
+
+  const handleCancelDeviceConnect = () => {
+    connectionAttemptRef.current += 1
+    abortRef.current?.abort()
+    abortRef.current = null
+    setDeviceAuthorization(null)
+    setConnectingMethod(null)
+  }
+
+  const handleCopyDeviceCode = () => {
+    if (!deviceAuthorization) {
+      return
+    }
+
+    void navigator.clipboard
+      .writeText(deviceAuthorization.userCode)
+      .then(() => {
+        new Notice(
+          t('settings.providers.chatgptOAuthCodeCopied', 'Device code copied.'),
+        )
+      })
+      .catch((error: unknown) => {
+        console.error('[YOLO] Failed to copy ChatGPT device code:', error)
       })
   }
 
   const handleDisconnect = () => {
     const execute = async () => {
+      connectionAttemptRef.current += 1
       abortRef.current?.abort()
       abortRef.current = null
       plugin
         .getChatGPTOAuthService(provider.id)
         .cancelPendingBrowserAuthorization()
       await plugin.disconnectChatGPTOAuthAccount(provider.id)
-      setPendingCode(null)
-      new Notice('ChatGPT OAuth 已断开')
+      setDeviceAuthorization(null)
+      new Notice(
+        t(
+          'settings.providers.chatgptOAuthDisconnectedNotice',
+          'ChatGPT OAuth disconnected.',
+        ),
+      )
       await refreshStatus()
     }
 
@@ -180,54 +313,116 @@ function ChatGPTOAuthPanel({
           {t('settings.providers.chatgptOAuthTitle', 'ChatGPT OAuth')}
         </span>
         {!connected ? (
-          <button
-            type="button"
-            onClick={handleConnect}
-            className="yolo-add-model-btn"
-            disabled={isConnecting || !Platform.isDesktop}
-          >
-            {isConnecting
-              ? t('settings.providers.chatgptOAuthConnecting', 'Connecting...')
-              : t('settings.providers.chatgptOAuthConnect', 'Connect')}
-          </button>
+          <div className="yolo-chatgpt-oauth-login-actions">
+            <button
+              type="button"
+              onClick={handleBrowserConnect}
+              className="yolo-add-model-btn"
+              disabled={connectingMethod !== null || !Platform.isDesktop}
+              title={
+                Platform.isDesktop
+                  ? undefined
+                  : t(
+                      'settings.providers.chatgptOAuthBrowserDesktopOnly',
+                      'Browser login is only available on desktop.',
+                    )
+              }
+            >
+              {connectingMethod === 'browser'
+                ? t(
+                    'settings.providers.chatgptOAuthBrowserConnecting',
+                    'Opening browser...',
+                  )
+                : t(
+                    'settings.providers.chatgptOAuthBrowserLogin',
+                    'Browser login',
+                  )}
+            </button>
+            <button
+              type="button"
+              onClick={handleDeviceConnect}
+              className="yolo-add-model-btn yolo-chatgpt-oauth-secondary-btn"
+              disabled={connectingMethod !== null}
+            >
+              {connectingMethod === 'device'
+                ? t(
+                    'settings.providers.chatgptOAuthDeviceConnecting',
+                    'Waiting for authorization...',
+                  )
+                : t(
+                    'settings.providers.chatgptOAuthDeviceLogin',
+                    'Device code login',
+                  )}
+            </button>
+          </div>
         ) : (
           <button
             type="button"
             onClick={handleDisconnect}
             className="yolo-add-model-btn yolo-chatgpt-oauth-disconnect-btn"
-            disabled={isConnecting}
+            disabled={connectingMethod !== null}
           >
             {t('settings.providers.chatgptOAuthDisconnect', 'Disconnect')}
           </button>
         )}
       </div>
       <div className="yolo-no-models">
-        {!Platform.isDesktop && !connected
+        {loading
           ? t(
-              'settings.providers.oauthDesktopOnly',
-              'OAuth login is only available on desktop. Please connect on desktop first.',
+              'settings.providers.chatgptOAuthLoadingStatus',
+              'Loading ChatGPT OAuth status...',
             )
-          : loading
-            ? t(
-                'settings.providers.chatgptOAuthLoadingStatus',
-                'Loading ChatGPT OAuth status...',
-              )
-            : connected
-              ? `${t('settings.providers.chatgptOAuthConnected', 'Connected')}${accountId ? ` · ${accountId}` : ''}${expiresAt ? ` · ${t('settings.providers.chatgptOAuthExpires', 'expires')} ${new Date(expiresAt).toLocaleString()}` : ''}`
-              : t(
-                  'settings.providers.chatgptOAuthDisconnectedHelp',
-                  'Not connected. Connect to use models from your ChatGPT Plus / Pro account.',
-                )}
-        {pendingCode
-          ? ` ${t('settings.providers.chatgptOAuthPendingCode', 'Current device code:')} ${pendingCode}`
-          : ''}
+          : connected
+            ? `${t('settings.providers.chatgptOAuthConnected', 'Connected')}${accountId ? ` · ${accountId}` : ''}${expiresAt ? ` · ${t('settings.providers.chatgptOAuthExpires', 'expires')} ${new Date(expiresAt).toLocaleString()}` : ''}`
+            : t(
+                'settings.providers.chatgptOAuthDisconnectedHelp',
+                'Not connected. Connect to use models from your ChatGPT Plus / Pro account.',
+              )}
       </div>
-      <div className="yolo-chatgpt-oauth-note">
-        {t(
-          'settings.providers.chatgptOAuthStreamingNotice',
-          'Due to Obsidian environment limitations, ChatGPT OAuth currently does not support streaming responses.',
-        )}
-      </div>
+      {deviceAuthorization ? (
+        <div className="yolo-chatgpt-oauth-device-card">
+          <div className="yolo-chatgpt-oauth-device-code-row">
+            <span>
+              {t('settings.providers.chatgptOAuthPendingCode', 'Device code')}
+            </span>
+            <code>{deviceAuthorization.userCode}</code>
+          </div>
+          <div className="yolo-chatgpt-oauth-device-help">
+            {t(
+              'settings.providers.chatgptOAuthDeviceHelp',
+              'Enter this code on the authorization page within 15 minutes. Continue only if you started this login.',
+            )}
+          </div>
+          <div className="yolo-chatgpt-oauth-device-actions">
+            <button
+              type="button"
+              onClick={handleCopyDeviceCode}
+              className="yolo-add-model-btn yolo-chatgpt-oauth-secondary-btn"
+            >
+              {t('settings.providers.chatgptOAuthCopyCode', 'Copy code')}
+            </button>
+            <button
+              type="button"
+              className="yolo-add-model-btn yolo-chatgpt-oauth-secondary-btn"
+              onClick={() =>
+                openExternalLink(deviceAuthorization.verificationUri)
+              }
+            >
+              {t(
+                'settings.providers.chatgptOAuthOpenDevicePage',
+                'Open authorization page',
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={handleCancelDeviceConnect}
+              className="yolo-add-model-btn yolo-chatgpt-oauth-secondary-btn"
+            >
+              {t('settings.providers.chatgptOAuthCancelDevice', 'Cancel')}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -360,12 +555,144 @@ function GeminiOAuthPanel({
                   'Not connected. Connect to use Gemini quota from your Google account.',
                 )}
       </div>
-      <div className="yolo-chatgpt-oauth-note">
-        {t(
-          'settings.providers.geminiOAuthStreamingNotice',
-          'Gemini OAuth will try streaming by default and automatically fall back to buffered responses when needed.',
-        )}
+    </div>
+  )
+}
+
+function ClaudeOAuthPanel({
+  app,
+  provider,
+}: {
+  app: App
+  provider: LLMProvider
+}) {
+  const { t } = useLanguage()
+  const { updateSettings } = useSettings()
+  const token = provider.apiKey ?? ''
+  const [connecting, setConnecting] = useState(false)
+  const abortRef = useRef<AbortController | null>(null)
+
+  const handleChange = (next: string) => {
+    void updateSettings((current) => ({
+      ...current,
+      providers: current.providers.map((p) =>
+        p.id === provider.id ? { ...p, apiKey: next } : p,
+      ),
+    }))
+  }
+
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort()
+    }
+  }, [])
+
+  const handleAutoLogin = () => {
+    const execute = async () => {
+      setConnecting(true)
+      const abortController = new AbortController()
+      abortRef.current = abortController
+      const { runClaudeSetupToken } = await import(
+        '../../../core/cli-runtime/claude/setupToken'
+      )
+      const result = await runClaudeSetupToken(app, abortController.signal)
+      handleChange(result.token)
+      new Notice(
+        t(
+          'settings.providers.claudeOauthAutoLoginSuccess',
+          'Claude login connected.',
+        ),
+      )
+    }
+
+    void execute()
+      .catch((error: unknown) => {
+        if (error instanceof Error && error.name === 'AbortError') {
+          return
+        }
+        console.error('[YOLO] Failed to auto-login Claude OAuth:', error)
+        new Notice(
+          error instanceof Error
+            ? error.message
+            : 'Failed to auto-login Claude OAuth.',
+        )
+      })
+      .finally(() => {
+        abortRef.current = null
+        setConnecting(false)
+      })
+  }
+
+  const handleOpenTerminal = () => {
+    const execute = async () => {
+      const { openClaudeSetupTokenTerminal } = await import(
+        '../../../core/cli-runtime/claude/setupToken'
+      )
+      await openClaudeSetupTokenTerminal(app)
+      new Notice(
+        t(
+          'settings.providers.claudeOauthAutoLoginWindowsNotice',
+          'A terminal window opened to complete login. Paste the printed token into the field below once it finishes.',
+        ),
+        10000,
+      )
+    }
+
+    void execute().catch((error: unknown) => {
+      console.error('[YOLO] Failed to open Claude login terminal:', error)
+      new Notice(
+        error instanceof Error
+          ? error.message
+          : 'Failed to open Claude login terminal.',
+      )
+    })
+  }
+
+  return (
+    <div className="yolo-models-subsection">
+      <div className="yolo-models-subsection-header">
+        <span>{t('settings.providers.claudeOauthTitle', 'Claude OAuth')}</span>
+        <button
+          type="button"
+          onClick={Platform.isWin ? handleOpenTerminal : handleAutoLogin}
+          className="yolo-add-model-btn"
+          disabled={connecting || !Platform.isDesktop}
+          title={
+            Platform.isDesktop
+              ? undefined
+              : t(
+                  'settings.providers.claudeOauthAutoLoginDesktopOnly',
+                  'Automated login is only available on desktop.',
+                )
+          }
+        >
+          {connecting
+            ? t(
+                'settings.providers.claudeOauthAutoLoginConnecting',
+                'Waiting for browser login...',
+              )
+            : t('settings.providers.claudeOauthAutoLogin', 'Auto login')}
+        </button>
       </div>
+      <ObsidianSetting
+        name={t('settings.providers.claudeOauthTokenName', 'OAuth token')}
+        desc={t(
+          'settings.providers.claudeOauthTokenDesc',
+          'Run "claude setup-token" in a terminal and paste the token here. This quota is only usable through Claude Code chat mode — it will not appear in any model list. Paste a new token once it expires.',
+        )}
+      >
+        <ObsidianTextInput
+          type="password"
+          value={token}
+          placeholder="sk-ant-oat..."
+          onChange={handleChange}
+        />
+        <ObsidianButton
+          text={t('settings.providers.claudeOauthClear', 'Clear')}
+          onClick={() => handleChange('')}
+          disabled={!token}
+        />
+      </ObsidianSetting>
     </div>
   )
 }
@@ -394,6 +721,7 @@ function ProviderSectionItem({
 }: ProviderSectionItemProps) {
   const isChatGPTOAuth = provider.presetType === 'chatgpt-oauth'
   const isGeminiOAuth = provider.presetType === 'gemini-oauth'
+  const isClaudeOAuth = provider.presetType === 'claude-oauth'
   const displayBaseUrl = getProviderDisplayBaseUrl(provider)
   const chatModelsLabel = `${chatModels.length} ${t('settings.providers.chatModels').replace(/^个/, '')}`
   const embeddingModelsLabel = `${embeddingModels.length} ${t('settings.providers.embeddingModels').replace(/^个/, '')}`
@@ -565,6 +893,7 @@ function ProviderSectionItem({
           {isGeminiOAuth && (
             <GeminiOAuthPanel plugin={plugin} provider={provider} />
           )}
+          {isClaudeOAuth && <ClaudeOAuthPanel app={app} provider={provider} />}
           <ChatModelsTable
             provider={provider}
             app={app}
@@ -1270,17 +1599,20 @@ export function ProvidersAndModelsSection({
           plugin.clearGeminiOAuthRuntime(provider.id)
         }
         if (associatedEmbeddingModels.length > 0) {
-          const vectorManager = await plugin.tryGetVectorManager()
+          const vectorManagers = await plugin.tryGetVectorManagers()
 
-          if (vectorManager) {
-            await vectorManager.clearVectorsByModelIds(
-              associatedEmbeddingModels.map(
-                (embeddingModel) => embeddingModel.id,
+          if (vectorManagers.length > 0) {
+            const embeddingModelIds = associatedEmbeddingModels.map(
+              (embeddingModel) => embeddingModel.id,
+            )
+            await Promise.all(
+              vectorManagers.map((vm) =>
+                vm.clearVectorsByModelIds(embeddingModelIds),
               ),
             )
           } else {
             console.warn(
-              '[YOLO] Skip clearing embeddings because vector manager is unavailable.',
+              '[YOLO] Skip clearing embeddings because no vector managers are available.',
             )
           }
         }
@@ -1349,16 +1681,20 @@ export function ProvidersAndModelsSection({
     void (async () => {
       setDeletingEmbeddingModelIds((prev) => new Set(prev).add(modelId))
       try {
-        const vectorManager = await plugin.tryGetVectorManager()
-        if (vectorManager) {
+        const vectorManagers = await plugin.tryGetVectorManagers()
+        if (vectorManagers.length > 0) {
           const embeddingModelClient = getEmbeddingModelClient({
             settings,
             embeddingModelId: modelId,
           })
-          await vectorManager.clearAllVectors(embeddingModelClient)
+          await Promise.all(
+            vectorManagers.map((vm) =>
+              vm.clearAllVectors(embeddingModelClient),
+            ),
+          )
         } else {
           console.warn(
-            '[YOLO] Skip clearing embeddings because vector manager is unavailable.',
+            '[YOLO] Skip clearing embeddings because no vector managers are available.',
           )
         }
         await setSettings({

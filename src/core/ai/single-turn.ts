@@ -2,6 +2,7 @@ import { DEFAULT_MODEL_REQUEST_TIMEOUT_MS } from '../../settings/schema/setting.
 import { ChatModel } from '../../types/chat-model.types'
 import {
   LLMRequestBase,
+  NativeToolPolicy,
   RequestTool,
   RequestToolChoice,
 } from '../../types/llm/request'
@@ -11,6 +12,7 @@ import {
   ProviderMetadata,
   ResponseUsage,
 } from '../../types/llm/response'
+import { ProviderSessionAccessor } from '../../types/provider-session.types'
 import { LLMProvider } from '../../types/provider.types'
 import {
   type ToolCallArgumentDiagnostics,
@@ -87,6 +89,14 @@ type SingleTurnExecutionInput = {
   }
   debugTraceId?: string
   /**
+   * Conversation-scoped session handle for providers that run their own
+   * native session (see `LLMOptions.session`). Left unset by the lightweight
+   * helper calls, which have no conversation behind them.
+   */
+  session?: ProviderSessionAccessor
+  /** See `LLMOptions.nativeToolPolicy`. */
+  nativeToolPolicy?: NativeToolPolicy
+  /**
    * `standard` (default): forward the model as-configured, including any
    * hosted tools, reasoning, and custom-parameter injections.
    * `lightweight`: apply the lightweight request policy for one-shot helper
@@ -94,12 +104,19 @@ type SingleTurnExecutionInput = {
    * should not inherit hosted tools or heavyweight model customizations.
    */
   purpose?: 'standard' | 'lightweight'
+  /**
+   * `configured` (default): let the provider adapter translate the model's
+   * reasoning configuration.
+   * `omit`: send no YOLO-generated reasoning parameters and leave the
+   * provider/model on its native default behavior.
+   */
+  reasoningPolicy?: 'configured' | 'omit'
   onStreamDelta?: (delta: {
     contentDelta: string
     reasoningDelta: string
     chunk: LLMResponseStreaming
     toolCalls?: StreamedToolCall[]
-  }) => void
+  }) => void | Promise<void>
 }
 
 const DEFAULT_PRIMARY_REQUEST_TIMEOUT_MS = DEFAULT_MODEL_REQUEST_TIMEOUT_MS
@@ -124,14 +141,6 @@ const isNonEmptyStringField = (
 ): boolean => {
   const value = args[key]
   return typeof value === 'string' && value.length > 0
-}
-
-const isOptionalBooleanField = (
-  args: Record<string, unknown>,
-  key: string,
-): boolean => {
-  const value = args[key]
-  return value === undefined || typeof value === 'boolean'
 }
 
 const isPositiveIntegerField = (
@@ -184,20 +193,6 @@ const isValidWriteToolArguments = ({
 
   if (normalizedToolName === 'fs_write') {
     return isStringField(args, 'path') && isStringField(args, 'content')
-  }
-
-  if (normalizedToolName === 'fs_delete') {
-    return (
-      isStringField(args, 'path') && isOptionalBooleanField(args, 'recursive')
-    )
-  }
-
-  if (normalizedToolName === 'fs_create_dir') {
-    return isStringField(args, 'path')
-  }
-
-  if (normalizedToolName === 'fs_move') {
-    return isStringField(args, 'oldPath') && isStringField(args, 'newPath')
   }
 
   return true
@@ -267,7 +262,10 @@ export async function executeSingleTurn({
   streamFallbackRecoveryEnabled = true,
   geminiTools,
   debugTraceId,
+  session,
+  nativeToolPolicy,
   purpose = 'standard',
+  reasoningPolicy = 'configured',
   onStreamDelta,
 }: SingleTurnExecutionInput): Promise<SingleTurnExecutionResult> {
   const resolvedToolChoice: RequestToolChoice | undefined =
@@ -280,7 +278,14 @@ export async function executeSingleTurn({
         options: baseProviderOptions,
       })
     : { model, options: baseProviderOptions }
-  const effectiveModel = effectivePolicy.model
+  const effectiveModel =
+    reasoningPolicy === 'omit'
+      ? { ...effectivePolicy.model, reasoningType: undefined }
+      : effectivePolicy.model
+  const effectiveRequest =
+    reasoningPolicy === 'omit'
+      ? { ...request, reasoningLevel: undefined }
+      : request
   const effectiveProviderOptions = effectivePolicy.options
   const executionMode =
     providerClient.resolveResponseExecutionMode(deliveryMode)
@@ -290,12 +295,12 @@ export async function executeSingleTurn({
     systemHint: string | undefined,
   ): LLMRequestBase => {
     if (!systemHint) {
-      return request
+      return effectiveRequest
     }
-    const [firstMessage, ...restMessages] = request.messages
+    const [firstMessage, ...restMessages] = effectiveRequest.messages
     if (firstMessage?.role === 'system') {
       return {
-        ...request,
+        ...effectiveRequest,
         messages: [
           {
             ...firstMessage,
@@ -306,8 +311,11 @@ export async function executeSingleTurn({
       }
     }
     return {
-      ...request,
-      messages: [{ role: 'system', content: systemHint }, ...request.messages],
+      ...effectiveRequest,
+      messages: [
+        { role: 'system', content: systemHint },
+        ...effectiveRequest.messages,
+      ],
     }
   }
   const runNonStreaming = async (options?: {
@@ -336,6 +344,8 @@ export async function executeSingleTurn({
             signal: requestController.signal,
             debugTraceId,
             geminiTools: effectiveProviderOptions.geminiTools,
+            ...(session ? { session } : {}),
+            ...(nativeToolPolicy ? { nativeToolPolicy } : {}),
           },
         ),
       )
@@ -435,7 +445,7 @@ export async function executeSingleTurn({
       const streamIterator = await providerClient.streamResponse(
         effectiveModel,
         {
-          ...request,
+          ...effectiveRequest,
           tools,
           tool_choice: resolvedToolChoice,
           stream: true,
@@ -444,6 +454,8 @@ export async function executeSingleTurn({
           signal: streamController.signal,
           debugTraceId,
           geminiTools: effectiveProviderOptions.geminiTools,
+          ...(session ? { session } : {}),
+          ...(nativeToolPolicy ? { nativeToolPolicy } : {}),
         },
       )
 
@@ -507,7 +519,7 @@ export async function executeSingleTurn({
         const streamedToolCallList = toolCallAccumulator.getSnapshots()
 
         if (!isBufferedStreaming) {
-          onStreamDelta?.({
+          await onStreamDelta?.({
             contentDelta,
             reasoningDelta,
             chunk,
@@ -665,6 +677,13 @@ function mergeProviderMetadata(
             ],
           }
         : undefined,
+    // Providers re-send the full list as calls complete, so the later value
+    // supersedes rather than appends.
+    ...((next.hostedWebSearch ?? prev?.hostedWebSearch)
+      ? {
+          hostedWebSearch: next.hostedWebSearch ?? prev?.hostedWebSearch,
+        }
+      : {}),
   }
 }
 

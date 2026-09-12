@@ -13,7 +13,7 @@
     <img src="https://img.shields.io/github/v/release/Lapis0x0/obsidian-yolo?style=flat-square&color=00b894" alt="Latest Release">
   </a>
   <a href="https://github.com/Lapis0x0/obsidian-yolo/releases">
-    <img src="https://img.shields.io/github/downloads/Lapis0x0/obsidian-yolo/total?style=flat-square&color=0984e3" alt="Downloads">
+    <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FLapis0x0%2Fobsidian-yolo%2Fdownload-metrics%2Fbadge.json&style=flat-square" alt="Downloads">
   </a>
   <a href="https://github.com/Lapis0x0/obsidian-yolo/blob/main/LICENSE">
     <img src="https://img.shields.io/github/license/Lapis0x0/obsidian-yolo?style=flat-square&color=636e72" alt="License">
@@ -21,25 +21,81 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">English</a> | <b>简体中文</b> | <a href="./README_it.md">Italiano</a>
+  <a href="./README.md">English</a> | <b>简体中文</b> | <a href="./README_it.md">Italiano</a> | <a href="./README_es.md">Español</a>
 </p>
 
 <p align="center">
   QQ 群: <code>793057867</code> | <a href="./assets/wechat-group.png">微信群</a>
 </p>
 
+## Sponsors
+
+<table>
+<tr>
+<td width="200" align="center" valign="middle">
+  <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=obsidian-yolo">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://www.atlascloud.ai/logo-white.svg">
+      <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="163">
+    </picture>
+  </a>
+</td>
+<td valign="middle">
+  <b><a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=obsidian-yolo">Atlas Cloud</a></b> 为开发者提供覆盖语言、图像与视频生成的统一 AI API。一次接入即可使用横跨多种模态的 300+ 精选模型，无需分别维护不同模型供应商的集成。从 LLM Agent 到图像和视频生成，Atlas Cloud 让模型探索、效果比较与生产接入更加简单。
+  <br><br>
+  <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=obsidian-yolo"><b>探索 Atlas Cloud →</b></a>
+  &nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="https://www.atlascloud.ai/console/coding-plan"><b>查看 Coding Plan →</b></a>
+</td>
+</tr>
+<tr>
+<td width="200" align="center" valign="middle">
+  <a href="https://go.apimart.ai/gh-obsidian-yolo">
+    <img src="./assets/sponsor-apimart.png" alt="APIMart" width="163">
+  </a>
+</td>
+<td valign="middle">
+  感谢 <b><a href="https://go.apimart.ai/gh-obsidian-yolo">APIMart</a></b> 赞助了本项目！APIMart 是专注 AI 图片/视频生成的低价 API 平台，GPT-Image-2 低至 $0.006/张，1 美元可出图 160+ 张。图片、视频一套异步 API 通吃，提交任务拿 ID、回调取结果，跑批万张不超时、换模型不改代码。按量付费、无月费，通过此注册链接注册即可开用。
+  <br><br>
+  <a href="https://go.apimart.ai/gh-obsidian-yolo"><b>注册 APIMart →</b></a>
+</td>
+</tr>
+</table>
+
 ## 最近更新
 
-- **`1.6`**：推出全新的学习模式，可根据学习主题、目标和参考资料生成个性化学习项目，包括结构化大纲、知识点、闪卡与交互式知识地图；并通过 FSRS 间隔复习和 Anki 卡包导入，将知识整理、学习与长期复习串成完整工作流
+- **`1.6`**
+  - **支持本地推理 Embedding 模型与多知识库**：无需 API Key 即可完成知识库索引，还能按需拆分、独立管理多个知识库，检索时 Agent 会自动按名称匹配
+  - **新增 CLI 对话**：桌面端可在同一个对话界面里直接驱动本机已登录的 Claude Code、Codex、Hermes 或 Pi
+  - **推出全新学习模式**：根据学习主题、目标和参考资料生成个性化学习项目，包括结构化大纲、知识点、闪卡与交互式知识地图，配合 FSRS 间隔复习和 Anki 卡包导入，将学习与长期复习串成完整工作流
 
 - **`1.5`**：引入全新 Agent 运行时，让 AI 从「问答」升级为「协作」，完整支持工具调用、MCP、Skills、桌面 Bash、子 Agent 与联网搜索；同时带来长会话上下文与记忆、混合检索 RAG、焦点同步与 PDF 感知，以及多窗口对话与后台 Agent
 
 ## Highlights
 
-| 跨端可用的完整 Agent 体验 | 让 Vault 里的知识真正被你掌握 |
-|:-:|:-:|
-| ![Agent Tools](./assets/agenttools.gif) | ![Learning Mode](./assets/learning-mode.gif) |
-| 不止回答问题。YOLO 能理解并操作你的 Vault，调用工具与 MCP，并通过 Skills 按你的方式完成任务。 | 把主题与资料转化为专属学习内容，再用闪卡与 FSRS 持续复习，让知识从被收藏走向真正掌握。 |
+<table>
+<tr>
+<td width="50%" align="center"><b>完整的 Agent 体验｜在 OB 内使用 Codex/Claude Code</b></td>
+<td width="50%" align="center"><b>让 Vault 里的知识真正被你掌握</b></td>
+</tr>
+<tr valign="top">
+<td align="center"><img src="./assets/agenttools.gif" alt="Agent Tools" width="100%"></td>
+<td align="center"><img src="./assets/learning-mode.gif" alt="Learning Mode" width="100%"></td>
+</tr>
+<tr valign="top">
+<td align="center">不止回答问题。YOLO 能理解并操作你的 Vault，调用工具与 MCP，并通过 Skills 按你的方式完成任务。桌面端还能一键切到你已登录的 Claude Code 或 Codex，让它们直接在 Vault 里工作。</td>
+<td align="center">把主题与资料转化为专属学习内容，再用闪卡与 FSRS 持续复习，让知识从被收藏走向真正掌握。</td>
+</tr>
+<tr>
+<td colspan="2" align="center"><b>YOLO 白板｜Obsidian Canvas 的高性能实现</b></td>
+</tr>
+<tr>
+<td colspan="2" align="center"><img src="./assets/whiteboard.gif" alt="YOLO Whiteboard" width="100%"></td>
+</tr>
+<tr>
+<td colspan="2" align="center">你目前可以把它当成一个性能好上几倍到几十倍的 Obsidian Canvas。未来会添加更多可以充分拓展 AI 与人类思考疆界的新功能。</td>
+</tr>
+</table>
 
 ## Features
 
@@ -47,8 +103,9 @@
 
 | 特性 | 说明 |
 |------|------|
+| 🖥️ CLI Agent（桌面端） | 复用本机已登录的 Claude Code / Codex，直接在 Obsidian 里和 CLI Agent 对话 |
 | 🔌 外部 Agent 支持 | 通过 MCP，让 Hermes、OpenClaw 等外部 Agent 使用 YOLO 的 Vault 搜索，或派遣已配置的 YOLO Agent 执行任务 |
-| ⚡ Quick Ask 与 Smart Space | 无需离开编辑器即可提问、修改和续写内容 |
+| ⚡ Quick Ask | 无需离开编辑器即可提问、修改和续写内容 |
 | 🔎 Vault RAG | 检索整个 Vault，让回答建立在你自己的笔记之上 |
 | 🪟 多窗口对话 | 在独立对话窗口中并行处理不同任务与上下文 |
 | 🧠 记忆系统 | 让 YOLO 记住你的偏好、习惯与长期上下文，让连续对话更稳定、更懂你 |
@@ -81,13 +138,6 @@
 
 > [!WARNING]
 > YOLO 无法与 [Smart Composer](https://github.com/glowingjade/obsidian-smart-composer) 共存，请在使用前禁用或卸载 Smart Composer。
-
-## 移动端说明
-
-受限于 Obsidian 移动端与桌面端之间的能力差异，YOLO 在移动端暂时无法完整对齐桌面端的全部功能与体验。再加上个人维护精力有限，我目前只能保证移动端可用，而难以保证所有功能都能达到桌面端同等水准。
-
-如果你在移动端使用 YOLO，可能会遇到部分功能暂不可用、体验不一致或适配尚不完善的情况，还请理解。
-
 
 ## Roadmap
 
@@ -147,6 +197,10 @@
     <img src="https://img.shields.io/badge/爱发电-支持开发者-fd6c9e?style=for-the-badge" alt="爱发电">
   </a>
   &nbsp;
+  <a href="https://buymeacoffee.com/lapis0x0" target="_blank">
+    <img src="https://img.shields.io/badge/Buy Me a Coffee-海外赞助-FFDD00?style=for-the-badge" alt="Buy Me a Coffee">
+  </a>
+  &nbsp;
   <a href="https://github.com/Lapis0x0/obsidian-yolo/blob/main/donation-qr.jpg" target="_blank">
     <img src="https://img.shields.io/badge/微信/支付宝-赞赏码-00D924?style=for-the-badge" alt="微信/支付宝赞赏码">
   </a>
@@ -162,4 +216,4 @@
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Lapis0x0/obsidian-yolo&type=Date)](https://star-history.com/#Lapis0x0/obsidian-yolo&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=Lapis0x0/obsidian-yolo&type=Date)](https://star-history.dera.page/#Lapis0x0/obsidian-yolo&type=date)

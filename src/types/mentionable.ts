@@ -8,6 +8,17 @@ export type MentionableFolder = {
   type: 'folder'
   folder: TFolder
 }
+/**
+ * A directory outside the vault, referenced by absolute filesystem path.
+ *
+ * Vault folders resolve to a `TFolder` and have their contents read into the
+ * prompt; a directory outside the vault has no such reader, so the path itself
+ * is the context — the agent reaches it through the terminal / read tools.
+ */
+export type MentionableLocalFolder = {
+  type: 'local-folder'
+  path: string
+}
 
 export type CurrentFileViewState =
   | {
@@ -41,15 +52,31 @@ export type MentionableBlockData = {
   contentUnit?: 'characters' | 'words' | 'wordsCharacters'
   tableRowCount?: number
   tableColumnCount?: number
+  // PDF multi-quote annotation (see docs/plans/2026-08-16-pdf-annotation-quotes.md).
+  // Both are set together by the chat side when a PDF selection is turned into
+  // a numbered annotation via the PDF "quote" button; plain (non-annotated)
+  // blocks — including the existing add-to-sidebar path — never set these.
+  comment?: string
+  annotationNumber?: number
 }
 export type MentionableBlock = MentionableBlockData & {
   type: 'block'
 }
 export type MentionableAssistantQuote = {
   type: 'assistant-quote'
+  id?: string
+  annotationNumber?: number
   conversationId: string
   messageId: string
   content: string
+  comment?: string
+  selector?: {
+    start: number
+    end: number
+    exact: string
+    prefix?: string
+    suffix?: string
+  }
   contentHash?: string
   contentCount?: number
   contentUnit?: 'characters' | 'words' | 'wordsCharacters'
@@ -73,7 +100,7 @@ export type MentionableImage = {
   type: 'image'
   name: string
   mimeType: string
-  data: string // base64
+  data: string // base64 data URL
 }
 export type MentionablePDF = {
   type: 'pdf'
@@ -120,6 +147,7 @@ export type MentionableModel = {
 export type Mentionable =
   | MentionableFile
   | MentionableFolder
+  | MentionableLocalFolder
   | MentionableBlock
   | MentionableAssistantQuote
   | MentionableUrl
@@ -137,6 +165,7 @@ export type SerializedMentionableFolder = {
   type: 'folder'
   folder: string
 }
+export type SerializedMentionableLocalFolder = MentionableLocalFolder
 export type SerializedMentionableBlock = {
   type: 'block'
   content?: string
@@ -151,12 +180,24 @@ export type SerializedMentionableBlock = {
   contentUnit?: 'characters' | 'words' | 'wordsCharacters'
   tableRowCount?: number
   tableColumnCount?: number
+  comment?: string
+  annotationNumber?: number
 }
 export type SerializedMentionableAssistantQuote = {
   type: 'assistant-quote'
+  id?: string
+  annotationNumber?: number
   conversationId: string
   messageId: string
   content?: string
+  comment?: string
+  selector?: {
+    start: number
+    end: number
+    exact: string
+    prefix?: string
+    suffix?: string
+  }
   contentHash?: string
   contentCount?: number
   contentUnit?: 'characters' | 'words' | 'wordsCharacters'
@@ -171,6 +212,7 @@ export type SerializedMentionableModel = MentionableModel
 export type SerializedMentionable =
   | SerializedMentionableFile
   | SerializedMentionableFolder
+  | SerializedMentionableLocalFolder
   | SerializedMentionableBlock
   | SerializedMentionableAssistantQuote
   | SerializedMentionableUrl

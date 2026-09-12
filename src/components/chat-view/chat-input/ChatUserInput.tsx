@@ -1,4 +1,3 @@
-import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { SerializedEditorState } from 'lexical'
 import { FilePlus2 } from 'lucide-react'
 import { Notice } from 'obsidian'
@@ -6,6 +5,7 @@ import {
   type CSSProperties,
   type DragEvent as ReactDragEvent,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
   forwardRef,
   memo,
   useCallback,
@@ -19,9 +19,20 @@ import {
 import { useApp } from '../../../contexts/app-context'
 import { useLanguage } from '../../../contexts/language-context'
 import { useSettings } from '../../../contexts/settings-context'
+import type {
+  ChatModeSelectValue,
+  ToolChatMode,
+} from '../../../core/agent/chat-mode'
+import {
+  availableBuiltinChatModes,
+  isModuleChatMode,
+} from '../../../core/agent/chat-mode'
+import type { CliContextUsageCategory } from '../../../core/cli-runtime/types'
 import { getYoloSnippetsPath } from '../../../core/paths/yoloPaths'
+import type { LiteSkillEntry } from '../../../core/skills/liteSkills'
 import { isSkillEnabledForAssistant } from '../../../core/skills/skillPolicy'
 import { openSnippetsFileInVault } from '../../../core/snippets/snippetsFile'
+import type { SnippetEntry } from '../../../core/snippets/snippetsManager'
 import { useLiteSkillEntries } from '../../../hooks/useLiteSkillEntries'
 import { ChatSelectedSkill } from '../../../types/chat'
 import { ChatModel } from '../../../types/chat-model.types'
@@ -35,7 +46,6 @@ import {
   serializeMentionable,
 } from '../../../utils/chat/mentionable'
 import ContextUsagePopover from '../ContextUsagePopover'
-import ContextUsageRing from '../ContextUsageRing'
 import { useSnippetEntries } from '../hooks/useSnippetEntries'
 import type { ContextBreakdownInputs } from '../useContextBreakdown'
 
@@ -44,13 +54,19 @@ import {
   isChatInputEmpty,
   resolveChatInputEditorSeed,
 } from './chatInputDraft'
-import { ChatMode, ChatModeSelect } from './ChatModeSelect'
+import {
+  ChatModeSelect,
+  type ModuleChatModeOption,
+  type YoloByMode,
+  narrowToMentionChatMode,
+} from './ChatModeSelect'
 import { ChatQuickAccess } from './ChatQuickAccess'
 import ChatSkillBadge from './ChatSkillBadge'
 import { FileUploadButton } from './FileUploadButton'
 import MentionableBadge from './MentionableBadge'
 import MessageInputCore, { type MessageInputCoreRef } from './MessageInputCore'
 import { ModelSelect } from './ModelSelect'
+import { canAcceptDrop } from './plugins/drop/resolveDrop'
 import type { SlashCommand } from './plugins/mention/SkillSlashPlugin'
 import { ReasoningSelect, supportsReasoning } from './ReasoningSelect'
 import { SubmitButton } from './SubmitButton'
@@ -66,6 +82,9 @@ export type ChatUserInputRef = {
 
 export type ChatUserInputControlLayout = 'composer-toolbar' | 'inline'
 
+/** Stable default so the mode selector's props identity survives re-renders. */
+const EMPTY_YOLO_BY_MODE: YoloByMode = {}
+
 export type ChatUserInputProps = {
   initialSerializedEditorState: SerializedEditorState | null
   getInitialSerializedEditorState?: () => SerializedEditorState | null
@@ -77,10 +96,13 @@ export type ChatUserInputProps = {
   setMentionables: (mentionables: Mentionable[]) => void
   selectedSkills?: ChatSelectedSkill[]
   setSelectedSkills?: (skills: ChatSelectedSkill[]) => void
+  enableSkills?: boolean
   autoFocus?: boolean
   addedBlockKey?: string | null
   modelId?: string
   onModelChange?: (modelId: string) => void
+  showModelControl?: boolean
+  allowModelMentions?: boolean
   // 用于显示聚合后的 mentionables(包含历史消息中的文件)
   displayMentionables?: Mentionable[]
   // 删除时从所有消息中删除的回调
@@ -89,6 +111,7 @@ export type ChatUserInputProps = {
   reasoningLevel?: ReasoningLevel
   onReasoningChange?: (level: ReasoningLevel) => void
   showReasoningSelect?: boolean
+  runtimeControls?: ReactNode
   showPlaceholder?: boolean
   // Compact mode: hide controls for historical messages
   compact?: boolean
@@ -96,17 +119,22 @@ export type ChatUserInputProps = {
   onToggleCompact?: () => void
   currentAssistantId?: string
   onSelectAssistantForConversation?: (assistantId: string) => void
-  currentChatMode?: ChatMode
-  onSelectChatModeForConversation?: (mode: ChatMode) => void
-  chatMode?: ChatMode
-  onChatModeChange?: (mode: ChatMode) => void
-  yoloEnabled?: boolean
-  onYoloChange?: (enabled: boolean) => void
+  currentChatMode?: ChatModeSelectValue
+  onSelectChatModeForConversation?: (mode: ChatModeSelectValue) => void
+  chatMode?: ChatModeSelectValue
+  onChatModeChange?: (mode: ChatModeSelectValue) => void
+  chatModeOptions?: readonly ChatModeSelectValue[]
+  moduleModeOptions?: readonly ModuleChatModeOption[]
+  yoloByMode?: YoloByMode
+  onYoloChange?: (mode: ToolChatMode, enabled: boolean) => void
+  showYoloToggle?: boolean
   controlLayout?: ChatUserInputControlLayout
   onControlPopoverOpenChange?: (isOpen: boolean) => void
   allowAgentModeOption?: boolean
+  onEditorKeyDown?: (event: React.KeyboardEvent<HTMLDivElement>) => void
   enableResize?: boolean
   onRunSlashCommand?: (command: SlashCommand) => void
+  nativeSlashCommands?: SlashCommand[]
   // 当父级正在执行 conversation run 时，发送按钮切换为停止按钮（圆形 + 方块）
   isGenerating?: boolean
   canQueueWhileGenerating?: boolean
@@ -115,27 +143,28 @@ export type ChatUserInputProps = {
   contextUsage?: {
     promptTokens: number
     maxContextTokens: number | null
+    cacheHitRate?: number
     label: string
-    /** When provided, the ring becomes a popover trigger that opens the
-     * per-bucket context breakdown. Builder is called lazily on open and may
-     * be async; resolution to null surfaces as a non-blocking error inside
-     * the popover (the ring still works for hover hint). */
+    /** When provided, the popover includes the native local-estimate breakdown. */
     buildBreakdownInputs?: () =>
       | ContextBreakdownInputs
       | null
       | Promise<ContextBreakdownInputs | null>
+    /** Provider-reported categories (Claude getContextUsage). */
+    categories?: readonly CliContextUsageCategory[]
   }
   showQuickAccess?: boolean
+  /** Runtime-native skills; bypasses assistant-specific YOLO skill policy. */
+  skillEntries?: LiteSkillEntry[]
+  quickAccessSkillEntries?: LiteSkillEntry[]
+  quickAccessSnippetEntries?: SnippetEntry[]
+  skipImageModelCapabilityCheck?: boolean
+  allowImageAttachments?: boolean
 }
 
 const DEFAULT_INPUT_HEIGHT = 80
 const MIN_INPUT_HEIGHT = 80
 const MAX_INPUT_HEIGHT = 520
-
-function isFileDragEvent(event: ReactDragEvent<HTMLDivElement>) {
-  const types = Array.from(event.dataTransfer.types ?? [])
-  return types.includes('Files')
-}
 
 const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
   (
@@ -150,14 +179,18 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
       setMentionables,
       selectedSkills = [],
       setSelectedSkills,
+      enableSkills = true,
       autoFocus = false,
       modelId,
       onModelChange,
+      showModelControl = true,
+      allowModelMentions = true,
       displayMentionables,
       onDeleteFromAll,
       reasoningLevel,
       onReasoningChange,
       showReasoningSelect = true,
+      runtimeControls,
       showPlaceholder = true,
       compact = false,
       hideBadgeMentionables = false,
@@ -168,25 +201,34 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
       onSelectChatModeForConversation,
       chatMode,
       onChatModeChange,
-      yoloEnabled = false,
+      chatModeOptions = availableBuiltinChatModes(),
+      moduleModeOptions,
+      yoloByMode = EMPTY_YOLO_BY_MODE,
       onYoloChange,
+      showYoloToggle = true,
       controlLayout = 'composer-toolbar',
       onControlPopoverOpenChange,
       allowAgentModeOption = true,
+      onEditorKeyDown,
       enableResize = false,
       onRunSlashCommand,
+      nativeSlashCommands,
       isGenerating = false,
       canQueueWhileGenerating = true,
       onAbort,
       contextUsage,
       showQuickAccess = false,
+      skillEntries,
+      quickAccessSkillEntries,
+      quickAccessSnippetEntries,
+      skipImageModelCapabilityCheck = false,
+      allowImageAttachments = true,
     },
     ref,
   ) => {
     const app = useApp()
     const { t } = useLanguage()
     const { settings, setSettings } = useSettings()
-    const reduceMotion = useReducedMotion()
     const mentionDisplayMode =
       settings.chatOptions.mentionDisplayMode ?? 'inline'
     const rememberedInputHeight = useMemo(() => {
@@ -239,8 +281,8 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
       [displayMentionables, mentionables],
     )
     const effectiveSelectedSkills = useMemo(
-      () => selectedSkills,
-      [selectedSkills],
+      () => (enableSkills ? selectedSkills : []),
+      [enableSkills, selectedSkills],
     )
     const selectedSkillsRef = useRef(effectiveSelectedSkills)
     selectedSkillsRef.current = effectiveSelectedSkills
@@ -248,20 +290,36 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
       () => settings.chatModels.filter((model) => model.enable ?? true),
       [settings.chatModels],
     )
+    const mentionableModels = allowModelMentions ? enabledChatModels : []
 
-    const allSkillEntries = useLiteSkillEntries(app, { settings })
+    const isModuleMode =
+      typeof chatMode === 'string' && isModuleChatMode(chatMode)
+    const loadedSkillEntries = useLiteSkillEntries(app, {
+      settings,
+      scope: isModuleMode ? { moduleChatModeId: chatMode } : undefined,
+    })
+    const allSkillEntries = quickAccessSkillEntries ?? loadedSkillEntries
     const availableAssistants = useMemo(
       () => settings.assistants || [],
       [settings.assistants],
     )
     const availableSkills = useMemo(() => {
-      const currentAssistant = currentAssistantId
-        ? (availableAssistants.find(
-            (assistant) => assistant.id === currentAssistantId,
-          ) ?? null)
-        : null
+      if (!enableSkills) return []
+      if (skillEntries) return skillEntries
+      // Module chat modes bypass the assistant gate entirely: the mode's own
+      // skills (already scoped into `allSkillEntries` above) plus every
+      // enabled vault skill, filtered only by the global disabled-skill list
+      // — mirrors the same bypass in `useChatStreamManager`/
+      // `buildCustomInstructionsSubsections`.
+      const currentAssistant = isModuleMode
+        ? null
+        : currentAssistantId
+          ? (availableAssistants.find(
+              (assistant) => assistant.id === currentAssistantId,
+            ) ?? null)
+          : null
 
-      if (!currentAssistant) {
+      if (!isModuleMode && !currentAssistant) {
         return []
       }
 
@@ -274,9 +332,18 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
           defaultLoadMode: skill.mode,
         }),
       )
-    }, [allSkillEntries, availableAssistants, currentAssistantId, settings])
+    }, [
+      allSkillEntries,
+      availableAssistants,
+      currentAssistantId,
+      enableSkills,
+      isModuleMode,
+      skillEntries,
+      settings,
+    ])
 
-    const availableSnippets = useSnippetEntries()
+    const loadedSnippetEntries = useSnippetEntries()
+    const availableSnippets = quickAccessSnippetEntries ?? loadedSnippetEntries
 
     const handleCreateSnippetsFile = useCallback(() => {
       void (async () => {
@@ -527,31 +594,31 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
 
     const handleContainerDragEnter = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
-        if (compact || !isFileDragEvent(event)) {
+        if (compact || !canAcceptDrop(app, event.dataTransfer)) {
           return
         }
 
         fileDragDepthRef.current += 1
         setIsFileDragActive(true)
       },
-      [compact],
+      [app, compact],
     )
 
     const handleContainerDragOver = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
-        if (compact || !isFileDragEvent(event)) {
+        if (compact || !canAcceptDrop(app, event.dataTransfer)) {
           return
         }
 
         event.preventDefault()
         event.dataTransfer.dropEffect = 'copy'
       },
-      [compact],
+      [app, compact],
     )
 
     const handleContainerDragLeave = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
-        if (compact || !isFileDragEvent(event)) {
+        if (compact || !canAcceptDrop(app, event.dataTransfer)) {
           return
         }
 
@@ -560,17 +627,12 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
           setIsFileDragActive(false)
         }
       },
-      [compact],
+      [app, compact],
     )
 
-    const handleContainerDropCapture = useCallback(
-      (event: ReactDragEvent<HTMLDivElement>) => {
-        if (isFileDragEvent(event)) {
-          clearFileDragState()
-        }
-      },
-      [clearFileDragState],
-    )
+    const handleContainerDropCapture = useCallback(() => {
+      clearFileDragState()
+    }, [clearFileDragState])
 
     const handleContainerMouseDown = useCallback(
       (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -618,28 +680,32 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
         <ChatModeSelect
           mode={chatMode}
           onChange={onChatModeChange}
-          yoloEnabled={yoloEnabled}
+          availableModes={chatModeOptions}
+          moduleModeOptions={moduleModeOptions}
+          yoloByMode={yoloByMode}
           onYoloChange={onYoloChange ?? (() => {})}
+          showYoloToggle={showYoloToggle}
           side="top"
           sideOffset={8}
         />
       ) : null
 
-    const renderModelControl = () => (
-      <ModelSelect
-        modelId={modelId}
-        onChange={onModelChange}
-        onMenuOpenChange={onControlPopoverOpenChange}
-        align="center"
-        sideOffset={8}
-        popover={{
-          variant: 'default',
-          minWidth: 240,
-          maxWidth: 320,
-          maxHeight: 560,
-        }}
-      />
-    )
+    const renderModelControl = () =>
+      showModelControl ? (
+        <ModelSelect
+          modelId={modelId}
+          onChange={onModelChange}
+          onMenuOpenChange={onControlPopoverOpenChange}
+          align="center"
+          sideOffset={8}
+          popover={{
+            variant: 'default',
+            minWidth: 240,
+            maxWidth: 320,
+            maxHeight: 560,
+          }}
+        />
+      ) : null
 
     const renderReasoningControl = () =>
       showReasoningSelect && supportsReasoning(currentModel) ? (
@@ -655,21 +721,15 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
 
     const renderContextUsageControl = () =>
       contextUsage ? (
-        contextUsage.buildBreakdownInputs ? (
-          <ContextUsagePopover
-            promptTokens={contextUsage.promptTokens}
-            maxContextTokens={contextUsage.maxContextTokens}
-            label={contextUsage.label}
-            anchorRef={containerRef}
-            buildInputs={contextUsage.buildBreakdownInputs}
-          />
-        ) : (
-          <ContextUsageRing
-            promptTokens={contextUsage.promptTokens}
-            maxContextTokens={contextUsage.maxContextTokens}
-            label={contextUsage.label}
-          />
-        )
+        <ContextUsagePopover
+          promptTokens={contextUsage.promptTokens}
+          maxContextTokens={contextUsage.maxContextTokens}
+          cacheHitRate={contextUsage.cacheHitRate}
+          label={contextUsage.label}
+          anchorRef={containerRef}
+          buildInputs={contextUsage.buildBreakdownInputs}
+          categories={contextUsage.categories}
+        />
       ) : null
 
     const renderSubmitControl = () => (
@@ -778,7 +838,7 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
           {isFileDragActive && (
             <div className="yolo-chat-user-input-drop-hint" aria-hidden="true">
               <FilePlus2 size={24} />
-              <span>{t('chat.dropFilesHint', '松开以添加文件')}</span>
+              <span>{t('chat.dropFilesHint', '松开以添加到对话')}</span>
             </div>
           )}
           <div className="yolo-chat-user-input-editor" role="presentation">
@@ -807,7 +867,9 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
                   >
                     @
                   </span>
-                  {t('chat.placeholderMention', '添加引用或模型')}
+                  {allowModelMentions
+                    ? t('chat.placeholderMention', '添加引用或模型')
+                    : t('chat.placeholderMentionReferences', '添加引用')}
                   {'，'}
                   <span
                     className="yolo-placeholder-trigger"
@@ -829,6 +891,7 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
               onChange={handleChange}
               onTextContentChange={handleTextContentChange}
               onEnter={handleEnter}
+              onKeyDown={onEditorKeyDown}
               onFocus={onFocus}
               autoFocus={autoFocus}
               mentionables={mentionables}
@@ -836,10 +899,12 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
               mentionDisplayMode={mentionDisplayMode}
               onDeleteFromAll={onDeleteFromAll}
               displayMentionablesForDelete={effectiveMentionables}
-              enableSkills
+              enableSkills={enableSkills}
               enableAttachments
-              selectedSkills={selectedSkills}
-              setSelectedSkills={setSelectedSkills}
+              allowImageAttachments={allowImageAttachments}
+              skipImageModelCapabilityCheck={skipImageModelCapabilityCheck}
+              selectedSkills={effectiveSelectedSkills}
+              setSelectedSkills={enableSkills ? setSelectedSkills : undefined}
               currentModel={currentModel}
               mentionMenuMode={
                 onSelectAssistantForConversation ||
@@ -850,14 +915,19 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
               assistants={availableAssistants}
               currentAssistantId={currentAssistantId}
               onSelectAssistant={onSelectAssistantForConversation}
-              currentChatMode={currentChatMode}
-              onSelectChatMode={onSelectChatModeForConversation}
+              currentChatMode={narrowToMentionChatMode(currentChatMode)}
+              onSelectChatMode={
+                onSelectChatModeForConversation
+                  ? (mode) => onSelectChatModeForConversation(mode)
+                  : undefined
+              }
               allowAgentModeOption={allowAgentModeOption}
-              models={enabledChatModels}
+              models={mentionableModels}
               skills={availableSkills}
               snippets={availableSnippets}
               onCreateSnippetsFile={handleCreateSnippetsFile}
               onRunSlashCommand={onRunSlashCommand}
+              nativeSlashCommands={nativeSlashCommands}
             />
           </div>
 
@@ -865,10 +935,15 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
             <div className="yolo-chat-user-input-controls">
               <div className="yolo-chat-user-input-controls__left">
                 <FileUploadButton
+                  allowImages={allowImageAttachments}
                   onUpload={(files) => coreRef.current?.uploadFiles(files)}
                 />
-                {renderModelControl()}
-                {renderReasoningControl()}
+                {runtimeControls ?? (
+                  <>
+                    {renderModelControl()}
+                    {renderReasoningControl()}
+                  </>
+                )}
               </div>
               <div className="yolo-chat-user-input-controls__right">
                 {renderContextUsageControl()}
@@ -880,6 +955,7 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
           {!compact && controlLayout === 'composer-toolbar' && (
             <div className="yolo-chat-user-input-send-row">
               <FileUploadButton
+                allowImages={allowImageAttachments}
                 onUpload={(files) => coreRef.current?.uploadFiles(files)}
               />
               <div className="yolo-chat-user-input-send-row__right">
@@ -895,34 +971,26 @@ const ChatUserInput = forwardRef<ChatUserInputRef, ChatUserInputProps>(
               {renderChatModeControl()}
             </div>
             <div className="yolo-chat-user-input-toolbar__right">
-              {renderModelControl()}
-              {renderReasoningControl()}
+              {runtimeControls ?? (
+                <>
+                  {renderModelControl()}
+                  {renderReasoningControl()}
+                </>
+              )}
             </div>
           </div>
         )}
-        <AnimatePresence initial={false} mode="popLayout">
-          {showQuickAccess && !compact ? (
-            <motion.div
-              key="quick-access"
-              className="yolo-chat-quick-access-motion"
-              initial={{ opacity: 0, y: -4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{
-                duration: reduceMotion ? 0 : 0.12,
-                ease: [0.22, 1, 0.36, 1],
-              }}
-            >
-              <ChatQuickAccess
-                skills={availableSkills}
-                snippets={availableSnippets}
-                onSelectSkill={handleQuickAccessSkillSelect}
-                onSelectSnippet={handleQuickAccessSnippetSelect}
-                onPopoverOpenChange={onControlPopoverOpenChange}
-              />
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
+        {showQuickAccess && !compact ? (
+          <div className="yolo-chat-quick-access-motion">
+            <ChatQuickAccess
+              skills={availableSkills}
+              snippets={availableSnippets}
+              onSelectSkill={handleQuickAccessSkillSelect}
+              onSelectSnippet={handleQuickAccessSnippetSelect}
+              onPopoverOpenChange={onControlPopoverOpenChange}
+            />
+          </div>
+        ) : null}
       </div>
     )
   },

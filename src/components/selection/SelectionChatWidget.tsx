@@ -6,7 +6,7 @@ import { LanguageProvider } from '../../contexts/language-context'
 import { PluginProvider } from '../../contexts/plugin-context'
 import { SettingsProvider } from '../../contexts/settings-context'
 import type { PdfSelectionResult } from '../../features/editor/selection-chat/getPdfSelectionData'
-import YoloPlugin from '../../main'
+import type YoloPlugin from '../../main'
 
 import type {
   SelectionActionMode,
@@ -14,7 +14,12 @@ import type {
 } from './SelectionActionsMenu'
 import { SelectionActionsMenu } from './SelectionActionsMenu'
 import { SelectionIndicator, getIndicatorPosition } from './SelectionIndicator'
+import { SelectionLengthHandle } from './SelectionLengthHandle'
 import type { SelectionInfo } from './SelectionManager'
+import {
+  getSelectionVisualLineRects,
+  trimRangeEndWhitespace,
+} from './selectionRangeGeometry'
 
 // ─── Discriminated union for widget options ──────────────────────────────────
 
@@ -26,6 +31,7 @@ type MarkdownWidgetOptions = {
   /** The .cm-editor element — used as host and for scroll listeners. */
   hostEl: HTMLElement
   onClose: () => void
+  onLengthDragStart?: (startClientY: number, currentClientY: number) => boolean
   onAction: (
     actionId: string,
     selection: SelectionInfo,
@@ -51,6 +57,12 @@ type PdfWidgetOptions = {
     rewriteBehavior?: SelectionActionRewriteBehavior,
     assistantId?: string,
   ) => void | Promise<void>
+  /**
+   * PDF-only "引用" button (docs/plans/2026-08-16-pdf-annotation-quotes.md
+   * item 6) — a control independent from `SelectionActionsMenu`, not one of
+   * its entries.
+   */
+  onQuoteAction: () => void
 }
 
 type SelectionChatWidgetOptions = MarkdownWidgetOptions | PdfWidgetOptions
@@ -63,6 +75,7 @@ type SelectionChatWidgetBodyProps = {
   hostEl: HTMLElement
   source: 'markdown' | 'pdf'
   onClose: () => void
+  onLengthDragStart?: (startClientY: number, currentClientY: number) => boolean
   onAction: (
     actionId: string,
     instruction: string,
@@ -70,6 +83,7 @@ type SelectionChatWidgetBodyProps = {
     rewriteBehavior?: SelectionActionRewriteBehavior,
     assistantId?: string,
   ) => void | Promise<void>
+  onQuoteAction?: () => void
 }
 
 function SelectionChatWidgetBody({
@@ -78,7 +92,9 @@ function SelectionChatWidgetBody({
   hostEl,
   source,
   onClose,
+  onLengthDragStart,
   onAction,
+  onQuoteAction,
 }: SelectionChatWidgetBodyProps) {
   const isMobile = !Platform.isDesktop
   const [showMenu, setShowMenu] = useState(false)
@@ -91,7 +107,6 @@ function SelectionChatWidgetBody({
     left: 0,
     top: 0,
   })
-
   useEffect(() => {
     // Calculate indicator position for menu positioning
     setIndicatorPosition(getIndicatorPosition(selection, hostEl, 8))
@@ -161,8 +176,36 @@ function SelectionChatWidgetBody({
     })
   }
 
+  const handleLengthDragStart = (
+    startClientY: number,
+    currentClientY: number,
+  ): boolean => {
+    const started = onLengthDragStart?.(startClientY, currentClientY) ?? false
+    if (started) onClose()
+    return started
+  }
+
+  // Available on mobile too: the bubble and its editor only ever depended on
+  // anchor geometry, never on the CSS Custom Highlight API, so mobile fully
+  // supports them — only painting the selection color stays desktop-only via
+  // `shouldCreateSelectionHighlight`. See the 2026-08-16 addendum in
+  // docs/plans/2026-08-16-pdf-annotation-quotes.md.
+  const handleQuoteClick = onQuoteAction
+    ? () => {
+        onClose()
+        onQuoteAction()
+      }
+    : undefined
+
   return (
     <>
+      {source === 'markdown' && !isMobile && onLengthDragStart && (
+        <SelectionLengthHandle
+          selection={selection}
+          containerEl={hostEl}
+          onDragStart={handleLengthDragStart}
+        />
+      )}
       <SelectionIndicator
         selection={selection}
         containerEl={hostEl}
@@ -177,6 +220,7 @@ function SelectionChatWidgetBody({
         onAction={handleAction}
         onHoverChange={setIsHoveringMenu}
         source={source}
+        onQuoteAction={handleQuoteClick}
       />
     </>
   )
@@ -342,7 +386,8 @@ export class SelectionChatWidget {
       return
     }
 
-    const rects = range.getClientRects()
+    const effectiveRange = trimRangeEndWhitespace(range)
+    const rects = getSelectionVisualLineRects(effectiveRange)
     const text = selection.toString().trim()
     if (!rects.length || !text) {
       this.handleClose()
@@ -354,7 +399,7 @@ export class SelectionChatWidget {
 
     this.currentSelection = {
       text,
-      range,
+      range: effectiveRange,
       rect,
       isMultiLine,
     }
@@ -417,7 +462,17 @@ export class SelectionChatWidget {
               hostEl={this.options.hostEl}
               source={this.options.source}
               onClose={this.handleClose}
+              onLengthDragStart={
+                this.options.source === 'markdown'
+                  ? this.options.onLengthDragStart
+                  : undefined
+              }
               onAction={onAction}
+              onQuoteAction={
+                this.options.source === 'pdf'
+                  ? this.options.onQuoteAction
+                  : undefined
+              }
             />
           </SettingsProvider>
         </LanguageProvider>

@@ -1,30 +1,47 @@
-import type { TranslationKeys } from '../types'
+import type { DeepPartial, TranslationKeys } from '../types'
 
-export const it: TranslationKeys = {
+export const it: DeepPartial<TranslationKeys> = {
   commands: {
     openChat: 'Apri chat',
     openChatSidebar: 'Apri chat (barra laterale)',
-    openLearningMode: 'Apri modalità di apprendimento',
-    learningModeLabel: 'YOLO: Modalità di apprendimento',
     newChatCurrentView: 'Nuova chat',
     openYoloNewChat: 'YOLO: Apri finestra chat',
     openNewChatTab: 'Apri nuova chat (nuova scheda)',
     openNewChatSplit: 'Apri nuova chat (divisione destra)',
     openNewChatWindow: 'Apri nuova chat (nuova finestra)',
+    openChatHistory: 'Apri cronologia chat',
+    exportCurrentConversationToVault:
+      'Esporta la conversazione attuale nel vault',
     addSelectionToChat: 'Aggiungi selezione alla chat',
     addFileToChat: 'Aggiungi file alla chat',
     addFolderToChat: 'Aggiungi cartella alla chat',
     rebuildVaultIndex: 'Ricostruisci indice completo del vault',
     updateVaultIndex: 'Aggiorna indice per file modificati',
-    continueWriting: 'AI continua scrittura',
-    continueWritingSelected: 'AI continua scrittura (selezione)',
-    customContinueWriting: 'AI continua personalizzato',
-    customRewrite: 'AI riscrivi personalizzato',
-    triggerSmartSpace: 'Attiva smart space',
+    triggerQuickAskContinue: 'Apri Quick Ask in modalità continua scrittura',
     triggerQuickAsk: 'Attiva quick ask',
     triggerTabCompletion: 'Attiva completamento tab',
     acceptInlineSuggestion: 'Accetta completamento',
     capturePdfRegion: 'Cattura regione PDF nella chat',
+  },
+
+  // Italian does not yet translate the full config-transfer surface. Keep
+  // these newly selectable catalog labels localized while other strings use
+  // their call-site fallbacks.
+  configTransfer: {
+    export: {
+      moduleConfigsUnredactedOnly:
+        'La configurazione dei moduli può contenere credenziali private del modulo ed è esclusa dalle esportazioni oscurate.',
+    },
+    import: {
+      noticePartialModuleConfig:
+        'Le impostazioni Host sono state importate, ma la configurazione dei moduli non è riuscita. Alcune impostazioni dei moduli potrebbero essere state scritte e non sono state annullate.',
+    },
+    keyLabels: {
+      jsSandbox: 'Autorizzazioni sandbox JS',
+      pluginUpdateAutoDownloadEnabled:
+        'Scarica automaticamente gli aggiornamenti del plugin',
+      moduleConfigs: 'Configurazione moduli',
+    },
   },
 
   common: {
@@ -64,6 +81,30 @@ export const it: TranslationKeys = {
       agent: 'Agent',
       composer: 'Sparkle',
     },
+    runtimeSelector: {
+      modeAccessibleLabel: 'Modalità chat',
+      chatLabel: 'Agent',
+      cliLabel: 'CLI',
+      chatDescription: 'Chat integrata di YOLO',
+      cliDescription: 'Usa CLI per attività',
+      accessibleLabel: 'Provider CLI: {runtime}',
+      menuLabel: 'Provider CLI',
+      claudeCodeLabel: 'Claude Code',
+      claudeCodeShortLabel: 'CC',
+      claudeCodeDescription: 'Claude Code su questo dispositivo',
+      codexLabel: 'Codex',
+      codexDescription: 'Codex su questo dispositivo',
+      hermesLabel: 'Hermes',
+      hermesDescription: 'Hermes su questo dispositivo',
+      piLabel: 'Pi',
+      piDescription: 'Pi su questo dispositivo',
+      ompLabel: 'omp',
+      ompDescription: 'Oh My Pi su questo dispositivo',
+      variantToggleHint:
+        'Passa tra {base} e {variant} — cambiare canale avvia una nuova sessione',
+      grokLabel: 'Grok',
+      grokDescription: 'Grok Build su questo dispositivo',
+    },
     chatList: {
       searchPlaceholder: 'Cerca conversazioni',
       empty: 'Nessuna conversazione',
@@ -81,7 +122,17 @@ export const it: TranslationKeys = {
       archived: 'Archiviate',
       hideArchived: 'Nascondi archiviate',
       exportConversation: 'Esporta conversazione nel vault',
+      exportShort: 'Esporta',
       moreActions: 'Altre azioni',
+      confirmDelete: 'Clicca di nuovo per eliminare',
+      openHistory: 'Cronologia chat',
+      legend: {
+        navigate: 'Naviga',
+        open: 'Apri',
+        delete: 'Elimina',
+        pin: 'Fissa',
+        rename: 'Rinomina',
+      },
     },
     chat: {
       exportSuccess: 'Chat esportata in {path}',
@@ -119,7 +170,6 @@ export const it: TranslationKeys = {
       },
       continuationPrompt: 'Prompt di sistema per continuazione',
       maxContinuationChars: 'Caratteri massimi di continuazione',
-      referenceRulesTitle: 'Regole di riferimento',
       referenceRulesPlaceholder:
         'Seleziona le cartelle il cui contenuto deve essere completamente iniettato.',
       knowledgeBaseTitle: 'Base di conoscenza',
@@ -127,374 +177,6 @@ export const it: TranslationKeys = {
         'Seleziona cartelle o file usati come ambito di recupero (lascia vuoto per tutti).',
       knowledgeBaseHint:
         "Abilita la ricerca embeddings per limitare l'ambito di recupero.",
-    },
-  },
-
-  smartSpace: {
-    webSearch: 'Web',
-    urlContext: 'URL',
-    mentionContextLabel: 'File menzionati',
-  },
-
-  learning: {
-    betaNotice: {
-      title: 'Avviso sulla beta pubblica della modalità apprendimento',
-      description:
-        'La modalità apprendimento è attualmente in beta pubblica. Alcune funzioni sono ancora in fase di perfezionamento e potrebbero essere instabili o contenere errori. In futuro, alcune funzioni della modalità apprendimento entreranno a far parte dei piani a pagamento. Gli utenti gratuiti potranno continuare a utilizzarla, ma potrebbero essere applicati limiti al numero di progetti di apprendimento creabili. I progetti esistenti che superano il limite gratuito potrebbero diventare di sola lettura, ma non verranno eliminati automaticamente.',
-      confirm: 'Ho capito, entra nella modalità apprendimento',
-      cancel: 'Non ora',
-    },
-    common: {
-      loading: 'Caricamento…',
-      all: 'Tutti',
-      allChapters: 'Tutti i capitoli',
-      allKnowledgePoints: 'Tutti i punti',
-      browse: 'Sfoglia',
-      cards: 'Carte',
-      exercises: 'Esercizi',
-      comingSoon: 'In arrivo',
-      expand: 'Espandi',
-      collapse: 'Comprimi',
-    },
-    mastery: {
-      mastered: 'Padroneggiato',
-      learning: 'In apprendimento',
-      new: 'Nuovo',
-    },
-    tabs: {
-      outline: 'Schema',
-      knowledgeMap: 'Mappa conoscenze',
-      cards: 'Carte',
-      exercises: 'Esercizi',
-    },
-    workspace: {
-      missingProject: 'Progetto non trovato',
-      projectNotFound: 'Il progetto non esiste o non ha terminato la scansione',
-      backToHome: 'Torna al centro apprendimento',
-      learned: 'Appreso',
-    },
-    home: {
-      title: 'Centro apprendimento',
-      newProject: 'Nuovo progetto',
-      createPlan: 'Crea piano di apprendimento',
-      summary:
-        'Hai {projects} progetti di apprendimento e {due} carte da ripassare oggi.',
-      greetingMorning: 'Buongiorno',
-      greetingAfternoon: 'Buon pomeriggio',
-      greetingEvening: 'Buonasera',
-      greetingSuffix: 'Cosa vuoi imparare?',
-      continueLearning: 'Continua ad apprendere',
-      todayPlan: 'Programma di oggi',
-      reviewDueCards: 'Ripassa {count} carte in scadenza',
-      openProject: 'Apri il progetto e continua ad apprendere',
-      continue: 'Continua',
-      priorityReview: 'Ripasso prioritario',
-      nextLearning: 'Prossimo argomento',
-      reviewKnowledgePoint: 'Ripassa “{point}”',
-      continueKnowledgePoint: 'Continua “{point}”',
-      startKnowledgePoint: 'Inizia “{point}”',
-      targetCards: 'Carte in obiettivo',
-      retention30Days: 'Ritenzione stimata a 30 giorni',
-      cardsDue: 'Carte da ripassare',
-      todayReview: 'Da ripassare oggi',
-      items: '{count} carte',
-      dueCardsLabel: 'carte in scadenza',
-      startReview: 'Inizia il ripasso di oggi',
-      reviewProjects: 'Da {count} progetti',
-      reviewMetaEmpty: 'Nessun ripasso in scadenza',
-      statsLoading: 'Aggiornamento dati di apprendimento',
-      statsUnavailable: 'Statistiche non disponibili per {count} progetti',
-      statsUnavailableEmpty:
-        'Le statistiche del progetto non sono temporaneamente disponibili',
-      statsLoadingShort: 'Aggiornamento',
-      noProjects: 'Nessun piano di apprendimento',
-      createFirstPlan: 'Crea il primo piano di apprendimento',
-      myProjects: 'I miei progetti',
-      learningPlans: 'Piani di apprendimento',
-      sortRecent: 'Più recenti',
-      sortCreated: 'Data creazione',
-      sortProgress: 'Avanzamento',
-      newLearningProject: 'Nuovo progetto di apprendimento',
-      newProjectHint: 'Di a YOLO cosa vuoi imparare e genera uno schema',
-      statusStudying: 'In apprendimento',
-      statusBuilding: 'Generazione',
-      statusOutlining: 'Pianificazione',
-      statusPaused: 'In pausa',
-      allProjectsPaused: 'Tutti i piani di apprendimento sono in pausa',
-      pauseProject: 'Metti in pausa',
-      resumeProject: 'Riprendi',
-      deleteProject: 'Elimina',
-      pauseSuccess: 'Piano di apprendimento in pausa',
-      resumeSuccess: 'Piano di apprendimento ripreso',
-      pauseFailed: 'Impossibile mettere in pausa il piano. Riprova.',
-      resumeFailed: 'Impossibile riprendere il piano. Riprova.',
-      deleteConfirmTitle: 'Elimina il piano di apprendimento',
-      deleteConfirmMessage:
-        'Spostare “{project}” e tutti i dati di ripasso nel cestino?',
-      deleteSuccess: 'Piano di apprendimento spostato nel cestino',
-      deleteFailed: 'Impossibile eliminare il piano. Riprova.',
-      deleteStateFailed:
-        'Il piano è stato spostato nel cestino, ma non è stato possibile rimuovere i dati di ripasso',
-      targetCount: '{completed}/{total} in obiettivo',
-      dueCount: '{count} da ripassare',
-      projectDue: '{count} elementi da ripassare oggi',
-      lastStudied: 'Ultimo studio {time}',
-      neverStudied: 'Non ancora studiato',
-    },
-    anki: {
-      entry: 'Importa da Anki',
-      title: 'Importa da Anki',
-      subtitle:
-        'Controlla il contenuto APKG prima di aggiungerlo al Centro apprendimento.',
-      close: 'Chiudi',
-      chooseFile: 'Scegli un file .apkg',
-      fileLimit: 'Dimensione massima: 200 MB',
-      preparingRuntime: 'Preparazione del parser Anki...',
-      parsing: 'Lettura delle carte e della cronologia...',
-      importing: 'Scrittura del progetto di apprendimento...',
-      parseFailed: 'Impossibile leggere questo APKG',
-      importFailed: "L'importazione non è stata completata",
-      errorTitle: 'Importazione Anki interrotta',
-      nameRequired: 'Inserisci un nome per il progetto prima di importare.',
-      projectName: 'Nome del progetto',
-      chapters: 'Capitoli',
-      cards: 'Carte',
-      history: 'Carte con cronologia valida',
-      suspended: 'Sospese',
-      media: 'Media',
-      skipped: 'Avvisi / ignorati',
-      chapterPaths: 'Percorsi dei capitoli',
-      warnings: 'Avvisi ed elementi ignorati',
-      noWarnings: 'Non sono stati segnalati avvisi o elementi ignorati.',
-      chooseAnother: 'Scegli un altro file',
-      retry: 'Riprova',
-      import: 'Importa progetto',
-      fileErrors: {
-        multiple: 'Seleziona esattamente un file APKG.',
-        extension: "Il file selezionato deve avere l'estensione .apkg.",
-        empty: 'Il file APKG selezionato è vuoto.',
-        tooLarge: 'Il file APKG selezionato supera il limite di 200 MB.',
-      },
-    },
-    wizard: {
-      title: 'Nuovo progetto di apprendimento',
-      createOutline: 'Crea e genera schema',
-      heading: 'Di a YOLO cosa vuoi imparare',
-      description:
-        'Compila le informazioni qui sotto e YOLO genererà uno schema strutturato.',
-      topicDefault: 'Imparare React',
-      topicLabel: 'Argomento',
-      topicHint:
-        'Per esempio: Imparare React, basi di diritto penale, capire un paper',
-      topicPlaceholder: 'Imparare React',
-      modeLabel: 'Modalità di apprendimento',
-      levelLabel: 'Livello attuale',
-      goalDefault: 'Sviluppare autonomamente app React di media complessità',
-      goalLabel: 'Obiettivo e note aggiuntive',
-      goalHint:
-        'Che livello vuoi raggiungere? Puoi anche aggiungere tempi, casi d’uso o argomenti da evitare.',
-      goalPlaceholder:
-        'Sviluppare autonomamente app React di media complessità; finire in due settimane, focus pratico, meno teoria pura',
-      referencesLabel: 'Materiali di riferimento',
-      referencesHint: 'YOLO personalizzerà lo schema in base ai file caricati',
-      optional: '(Opzionale)',
-      uploadTitle: 'Trascina i file qui o clicca per caricare',
-      uploadHint: 'Supporta PDF, Word e Markdown. Max 20 MB per file.',
-      levels: {
-        beginner: 'Principiante',
-        familiar: 'Conosco i concetti',
-        experienced: 'Ho esperienza',
-        advanced: 'Avanzato',
-      },
-      modes: {
-        comingSoon: 'In arrivo',
-        standard: {
-          title: 'Modalità standard',
-          desc: 'Genera un sistema strutturato con punti, carte ed esercizi',
-        },
-        project: {
-          title: 'Modalità progetto',
-          desc: 'Impara con progetti pratici, con l’AI che guida ogni consegna',
-        },
-      },
-    },
-    outlineBuilder: {
-      estimatedKnowledgePoints: 'Punti di conoscenza stimati',
-      failed: 'Generazione non riuscita',
-      failedDescription: 'Impossibile continuare la generazione. Riprova.',
-      failedKnowledgeChapters: 'Generazione dei punti non riuscita: {chapters}',
-      knowledgeGenerating: 'Generazione dei punti di conoscenza in corso',
-      knowledgeGeneratingCurrent: 'Generazione: {title}',
-      knowledgeGenerationComplete: 'Punti di conoscenza generati',
-      knowledgeGenerationFailed: 'Generazione dei punti non riuscita',
-      outlineGenerating: 'Generazione della scaletta in corso',
-      planningPath: 'Pianificazione del percorso di apprendimento in corso',
-      chapterTitlePlaceholder: 'Titolo del capitolo',
-      chapterContractPlaceholder:
-        'Descrivi ambito, limiti e numero stimato di punti del capitolo',
-      draftBadge: 'Bozza schema',
-      subagentPending: 'Sub-agent in attesa',
-      subagentReady: 'Dopo la conferma, un sub-agent lo genererà',
-      generatingHeading: 'Preparazione del percorso di apprendimento...',
-      structuringHeading: 'Organizzazione della struttura dei capitoli...',
-      refiningHeading: 'Capitoli pianificati: {count}. Ultimi ritocchi...',
-      readyHeading: 'Schema capitoli e contratto di generazione',
-      addCustomChapter: 'Aggiungi capitolo personalizzato',
-      overview: 'Panoramica generazione',
-      chapters: 'Capitoli',
-      estimatedPoints: 'Punti stimati',
-      estimatedCards: 'Carte stimate',
-      cardsHint: 'Stima di circa 3 carte per punto',
-      estimatedGeneration: 'Tempo stimato',
-      minutes: '~{count} min',
-      chapterNavigation: 'Navigazione capitoli',
-      confirmGenerate: 'Conferma schema e genera punti',
-      dragSort: 'Trascina per riordinare',
-      generating: 'Generazione...',
-    },
-    outline: {
-      emptyBody: 'Questo punto di conoscenza non ha ancora contenuto',
-      emptyProject:
-        'Questo progetto non ha ancora punti di conoscenza. La scaletta apparirà qui al termine della generazione.',
-      noPointSelected: 'Seleziona un punto di conoscenza',
-      searchPlaceholder: 'Cerca punti conoscenza...',
-      addChapter: 'Aggiungi capitolo',
-      addPoint: 'Aggiungi punto conoscenza',
-      chapterLabel: 'Capitolo {index}',
-      pointLabel: 'Punto {index} {title}',
-      openInObsidian: 'Apri in Obsidian',
-      regenerate: 'Rigenera',
-      masteryPct: 'Padronanza {value}%',
-      cardCount: '{count} carte',
-      exerciseCount: '{count} esercizi',
-    },
-    cards: {
-      cardCreateFailed: 'Creazione della scheda non riuscita, riprova',
-      empty:
-        'Ancora nessuna scheda. Genera prima i punti di conoscenza, poi crea le schede da essi.',
-      generating: 'Generazione delle schede in corso',
-      noReviewCards: 'Nessuna scheda da rivedere',
-      reviewSaveFailed: 'Salvataggio della valutazione non riuscito, riprova',
-      srsLoadFailed: 'Caricamento dei dati di ripasso non riuscito, riprova',
-      study: 'Studia',
-      generationCompleteTitle: 'Le carte di studio sono pronte',
-      generationCompleteSummary:
-        'Generati {chapters} capitoli e {cards} carte.',
-      generationExistingSummary:
-        'Le carte di {chapters} capitoli sono pronte; aggiunte {cards} nuove carte.',
-      generationPartialTitle: 'Alcune carte di studio sono pronte',
-      generationPartialSummary:
-        'Generate {cards} carte; {count} capitoli non sono stati completati.',
-      generationFailedTitle: 'Generazione delle carte non riuscita',
-      generationFailedSummary:
-        'Nessuna carta è stata generata. Controlla lo stato dei capitoli.',
-      startLearning: 'Inizia a studiare',
-      viewGenerationDetails: 'Vedi dettagli',
-      filteredTo: 'Filtrato su: ',
-      sortDue: 'Scadenza',
-      sortMastery: 'Padronanza',
-      newCard: 'Nuova carta',
-      due: 'Da ripassare',
-      suspended: 'Sospesa',
-      suspend: 'Sospendi scheda',
-      resume: 'Ripristina scheda',
-      suspendFailed: 'Impossibile aggiornare la sospensione. Riprova.',
-      targetChapter: 'Capitolo della scheda',
-      addToChapter: 'Aggiungi scheda',
-      question: 'Domanda',
-      answer: 'Risposta',
-      hideAnswer: 'Nascondi risposta',
-      showAnswer: 'Mostra risposta',
-      reviewForgot: 'Dimenticato',
-      reviewAgain: 'Di nuovo',
-      reviewHard: 'Incerto',
-      reviewGood: 'Capito',
-      reviewEasy: 'Facile',
-      reviewMinuteUnit: 'min',
-      reviewHourUnit: 'h',
-      reviewDayUnit: 'g',
-      flipHint: 'Clicca per girare o premi Spazio',
-      reviewDone: 'Ripasso completato',
-      reviewDoneCount: 'Ripassate {count} carte',
-      backToBrowse: 'Torna a sfoglia',
-      reviewShortcuts:
-        'Spazio per girare · Trascina orizzontalmente o premi 1 / 2 / 3 / 4 · Esc per sfogliare',
-      invalidProjectCards:
-        'I file delle carte hanno un formato non valido o UUID duplicati. Le modifiche sono disabilitate.',
-      invalidCardEntry: 'Formato della carta non valido',
-      cardLoadFailed: 'Impossibile caricare le carte. Riprova.',
-      cardUpdateFailed: 'Impossibile aggiornare la carta. Riprova.',
-      cardFileConflict:
-        'Il file delle carte è stato modificato altrove. Aggiorna e riprova.',
-      chapterGenerating: 'Generazione delle carte…',
-      chapterPartial: 'Alcune carte sono state generate',
-      chapterFailed: 'Generazione del capitolo non riuscita',
-      chapterMemoryRetention:
-        'Conservazione prevista tra 30 giorni: {{percent}}%',
-      savePending: 'In attesa del salvataggio…',
-      saving: 'Salvataggio…',
-      saved: 'Salvato',
-      saveFailed: 'Salvataggio non riuscito',
-      addToKnowledgePoint: 'Aggiungi carta',
-      emptyKnowledgePoint: 'Nessuna carta',
-      markRemembered: 'Ricordata',
-      markRememberedCount: 'Ricorda {{count}} carte',
-      markForgotten: 'Dimenticata',
-      markForgottenCount: 'Dimentica {{count}} carte',
-      moreActions: 'Altre azioni',
-      quickReviewFailed:
-        'Impossibile aggiornare lo stato di apprendimento. Riprova.',
-      confirmDelete: 'Confermare l’eliminazione?',
-      confirmDeleteCount: 'Eliminare {{count}} carte?',
-      deleteCount: 'Elimina {{count}} carte',
-      deleteTitle: 'Elimina carta',
-      deletePrompt:
-        'Eliminare questa carta? L’azione non può essere annullata.',
-      srsDeleteFailed:
-        'Carta eliminata, ma non è stato possibile rimuovere la cronologia',
-    },
-    exercises: {
-      empty:
-        'Ancora nessun esercizio. Genera prima i punti di conoscenza, poi crea gli esercizi da essi.',
-      mvpNoEvaluation:
-        'La valutazione automatica non è disponibile nella fase MVP',
-      noPracticeExercises: 'Nessun esercizio da praticare',
-      practice: 'Pratica',
-      locatedTo: 'Posizione: ',
-      allStatus: 'Tutti gli stati',
-      practiced: 'Praticato',
-      unpracticed: 'Non praticato',
-      emptyFiltered: 'Nessun esercizio corrisponde ai filtri',
-      chapterTitle: 'Capitolo {index} · {title}',
-      practicedCount: '{done}/{total} praticati',
-      pendingCount: '{count} in sospeso',
-      completed: 'Completato',
-      practiceDone: 'Pratica completata',
-      practiceDoneCount: 'Completati {count} esercizi',
-      exit: 'Esci',
-      answerPlaceholder: 'Scrivi qui la tua risposta...',
-      answerChars: '{count} caratteri inseriti',
-      aiEvaluating: 'AI in valutazione...',
-      yourAnswer: 'La tua risposta',
-      answerStrengths: 'Punti corretti',
-      answerGaps: 'Mancante o errato',
-      fullExplanation: 'Spiegazione completa',
-      referenceAnswer: 'Risposta di riferimento',
-      submitEvaluation: 'Invia per valutazione',
-      evaluating: 'Valutazione...',
-      nextQuestion: 'Domanda successiva',
-      retry: 'Riprova',
-      loadingNext: 'Caricamento prossima domanda...',
-      shortcutAnswering: '⌘/Ctrl + Enter invia · Esc torna',
-      shortcutSubmitting: 'AI sta valutando la risposta...',
-      shortcutFeedback: 'Enter / → prossima domanda · Esc torna',
-      shortcutTransition: 'Preparazione prossima domanda...',
-    },
-    graph: {
-      noProject: 'Nessun progetto selezionato',
-      knowledgePoints: '{count} punti conoscenza',
-      relations: '{count} relazioni',
-      empty: 'In attesa dell’argomento...',
     },
   },
 
@@ -509,23 +191,35 @@ export const it: TranslationKeys = {
       suggest: 'Fornisci suggerimenti',
       translateToChinese: 'Traduci in cinese',
     },
+    length: {
+      adjust: 'Regola lunghezza',
+      condense: 'Sintetizza',
+      expand: 'Espandi',
+      freeExpand: 'Espansione libera',
+      handle: 'Trascina per regolare la lunghezza',
+      noEditor: "Impossibile accedere all'editor corrente",
+      noSelection: 'Seleziona prima il testo da regolare.',
+      noEditorView: "Impossibile accedere alla vista dell'editor",
+      tableUnsupported: 'Le selezioni di tabella non sono ancora supportate.',
+    },
   },
 
   settings: {
     title: 'Impostazioni Yolo',
     tabs: {
       models: 'Modelli',
-      editor: 'Editor',
+      editor: 'Sparkle',
       knowledge: 'Conoscenza',
       tools: 'Strumenti',
       agent: 'Agent',
-      learning: 'Modalità studio',
+      modules: 'Moduli',
       others: 'Altro',
     },
     supportYolo: {
       name: 'Supporta il progetto',
       desc: 'Se trovi utile questo plugin, considera di supportarne lo sviluppo!',
-      buyMeACoffee: 'Offrimi un caffè',
+      afdian: 'Afdian (CN)',
+      buyMeACoffee: 'Buy Me a Coffee',
       reportBug: 'Segnala bug',
       featureRequest: 'Richiedi funzione',
     },
@@ -546,6 +240,8 @@ export const it: TranslationKeys = {
       globalSystemPrompt: 'Prompt di sistema globale',
       globalSystemPromptDesc:
         "Questo prompt viene aggiunto all'inizio di ogni conversazione chat.",
+      globalSystemPromptPlaceholder:
+        'Scrivi ![[Nota]] per incorporare il testo completo di quella nota',
       continuationSystemPrompt:
         'Prompt di sistema di continuazione predefinito',
       continuationSystemPromptDesc:
@@ -557,23 +253,154 @@ export const it: TranslationKeys = {
       tabCompletionSystemPromptDesc:
         'Messaggio di sistema applicato quando si generano suggerimenti di completamento tab; lascia vuoto per usare quello predefinito incorporato.',
     },
-    learning: {
-      generationTitle: 'Generazione',
-      generationModel: 'Modello di generazione per lo studio',
-      generationModelDesc:
-        "Usato per generare scalette, punti di conoscenza e schede. Questa scelta e indipendente dall'assistente corrente.",
+    modules: {
+      title: 'Moduli',
+      description:
+        'Visualizza le funzionalità opzionali di Yolo e il loro stato corrente.',
+      manage: 'Gestisci moduli',
+      manageDescription:
+        'Installa le funzionalità YOLO e verifica che siano pronte per l’uso.',
+      navigation: 'Navigazione impostazioni moduli',
+      enabled: 'Attivi',
+      enabledEmpty: 'Nessun modulo attivo.',
+      disabled: 'Disattivati',
+      disabledEmpty: 'Nessun modulo disattivato.',
+      settings: 'Impostazioni',
+      updateAndEnable: 'Aggiorna e attiva',
+      loading: 'Caricamento moduli…',
+      loadError: 'Impossibile caricare i moduli.',
+      settingsSaveError: 'Impossibile salvare le impostazioni del modulo',
+      catalogError: 'Catalogo: {error}',
+      installedError: 'Moduli installati: {error}',
+      intentError: 'Intento del modulo: {error}',
+      empty: 'Nessun modulo trovato.',
+      installed: 'Installati',
+      installedDescription: 'Moduli presenti in questa installazione.',
+      installedEmpty: 'Nessun modulo installato.',
+      available: 'Disponibili',
+      availableDescription:
+        'Moduli disponibili per questa installazione di Yolo.',
+      availableEmpty: 'Nessun altro modulo disponibile.',
+      version: 'Versione {version}',
+      availableVersion: 'Aggiornamento {version}',
+      install: 'Installa',
+      update: 'Aggiorna',
+      installing: 'Installazione…',
+      updating: 'Aggiornamento…',
+      reload: 'Riprova',
+      reloading: 'Nuovo tentativo…',
+      candidateUnavailable:
+        'Al momento non è possibile installare {name}. Il download potrebbe essere già in corso oppure il catalogo potrebbe essere cambiato.',
+      installError: 'Impossibile installare {name}: {error}',
+      updateError: 'Impossibile aggiornare {name}: {error}',
+      activationPendingDetail:
+        'La versione {version} è pronta e può essere attivata di nuovo.',
+      intentLabel: 'Intento',
+      intentUnknown: 'Non disponibile',
+      intentInstalledEnabled: 'Installato · abilitato',
+      intentInstalledDisabled: 'Installato · disabilitato',
+      intentUninstalled: 'Non installato',
+      readinessLabel: 'Disponibilità',
+      readiness: {
+        notInstalled: 'Non installato',
+        pending: 'In attesa o da riprovare',
+        ready: 'Pronto su questo dispositivo',
+        failed: 'Non riuscito',
+      },
+      incompatibleReason: 'Non compatibile: {reason}',
+      compatibility: {
+        platform: 'piattaforma',
+        hostApi: 'aggiorna YOLO Core',
+        dataSchema: 'schema dei dati',
+      },
+      retry: 'Riprova',
+      actionError: 'Impossibile modificare {name}: {error}',
+      failure: {
+        downloadTimeout:
+          'Il download del modulo è scaduto sia su Cloudflare sia su GitHub. Controlla la rete o il proxy e riprova.',
+        download:
+          'Impossibile scaricare il modulo da Cloudflare o GitHub. Controlla la rete o il proxy e riprova.',
+        integrity:
+          'Il modulo scaricato non ha superato il controllo di integrità, quindi l’installazione è stata interrotta. Riprova e contatta lo sviluppatore se il problema persiste.',
+        activation:
+          'Il modulo è stato scaricato ma non può essere avviato. Riprova e contatta lo sviluppatore se il problema persiste.',
+        unknown: 'Operazione del modulo non riuscita.',
+        diagnostic: 'Dettagli: {detail}',
+      },
+      actions: {
+        install: 'Installa',
+        installBusy: 'Installazione…',
+        enable: 'Abilita',
+        enableBusy: 'Abilitazione…',
+        disable: 'Disabilita',
+        disableBusy: 'Disabilitazione…',
+        uninstall: 'Disinstalla',
+        uninstallBusy: 'Disinstallazione…',
+      },
+      statuses: {
+        available: 'Disponibile',
+        installed: 'Installato',
+        active: 'Attivo',
+        disabled: 'Disabilitato',
+        updateAvailable: 'Aggiornamento disponibile',
+        activationPending: 'Attivazione in attesa',
+        failed: 'Non riuscito',
+      },
+      runtimeComponents: {
+        title: 'Componenti runtime',
+        description:
+          'Questi componenti supportano alcune funzionalità di YOLO.',
+        tokenizer: {
+          name: 'Tokenizer',
+          description: 'Conta i token del contesto e degli strumenti Agent.',
+          impact:
+            'Disattivandolo, il budget preciso dei token non è disponibile.',
+        },
+        pdfEngine: {
+          name: 'Motore PDF',
+          description:
+            'Estrae testo, renderizza pagine e prepara intervalli PDF.',
+          impact:
+            'Disattivandolo, la lettura PDF e gli strumenti pagina non funzionano.',
+        },
+        bashEngine: {
+          name: 'Motore Bash',
+          description:
+            'Fornisce una shell virtuale allo strumento bash per cercare e organizzare i file del vault.',
+          impact:
+            'Disattivandolo, lo strumento bash non è disponibile e il modello perde la ricerca e l’organizzazione dei file.',
+        },
+        embeddingEngine: {
+          name: 'Motore di embedding',
+          description:
+            'Esegue modelli di embedding locali sul dispositivo per un’indicizzazione privata e offline.',
+          impact:
+            'Disattivandolo, i modelli di embedding locali non sono disponibili; il RAG utilizza un provider di embedding remoto.',
+        },
+        statuses: {
+          missing: 'In attesa di installazione',
+          downloading: 'Download in corso',
+          ready: 'Pronto',
+          loading: 'Caricamento',
+          active: 'In uso',
+          quiescing: 'Completamento attività in corso',
+          disabled: 'Disabilitato',
+          failed: 'Non riuscito',
+        },
+      },
     },
-    smartSpace: {
-      quickActionsTitle: 'Azioni rapide smart space',
+    continuationQuickActions: {
+      quickActionsTitle: 'Preset di continuazione scrittura',
       quickActionsDesc:
-        'Personalizza le azioni rapide e i prompt visualizzati nello smart space',
+        'Personalizza le azioni rapide e i prompt mostrati nella modalità di continuazione di Quick Ask',
+      quickActionsModalTitle: 'Preset di continuazione Quick Ask',
       configureActions: 'Configura azioni rapide',
       actionsCount: 'Azioni rapide configurate: {count}',
       addAction: 'Aggiungi azione',
       resetToDefault: 'Ripristina predefiniti',
       confirmReset:
         'Sei sicuro di voler ripristinare le azioni rapide predefinite ed eliminare tutte le impostazioni personalizzate?',
-      resetConfirmTitle: 'Ripristina azioni rapide smart space',
+      resetConfirmTitle: 'Ripristina i preset di continuazione scrittura',
       actionLabel: 'Etichetta azione',
       actionLabelDesc: "Testo visualizzato nell'azione rapida",
       actionLabelPlaceholder: 'Ad esempio, continua a scrivere',
@@ -705,21 +532,36 @@ export const it: TranslationKeys = {
       skillsCount: '{count} competenze',
       skillsCountWithEnabled: '{count} competenze (abilitate {enabled})',
       skillsGlobalDesc:
-        'Le skill vengono rilevate dalle skill integrate e da {path}/**/*.md (escludendo Skills.md quando applicabile). Disabilitale qui per bloccarle su tutti gli agent.',
+        'Le skill vengono rilevate dalle skill integrate, dai file {path}/*.md e dai pacchetti {path}/<folder>/SKILL.md. Disabilitale qui per bloccarle su tutti gli agent.',
       yoloBaseDir: 'Cartella base YOLO',
       yoloBaseDirDesc:
         'Inserisci un percorso relativo al vault (senza / iniziale). Esempio: YOLO nella radice del vault, oppure setting/YOLO nella cartella setting.',
       yoloBaseDirPlaceholder: 'YOLO',
+      yoloBaseDirHiddenPath:
+        'La cartella base YOLO non può usare cartelle nascoste. Rimuovi il punto iniziale dal nome, ad esempio cambia .yolo in yolo.',
+      yoloBaseDirMigrated:
+        'La cartella base YOLO ora usa {target}, che Obsidian può indicizzare.',
+      yoloBaseDirMigrationConflict:
+        'La cartella base YOLO non è stata spostata perché {target} esiste già. Le impostazioni esistenti sono state mantenute.',
+      yoloBaseDirMigrationFailed:
+        'Impossibile migrare la cartella base YOLO. Le impostazioni esistenti sono state mantenute.',
+      yoloBaseDirMigrationRollbackFailed:
+        'YOLO è stato spostato da {source} a {target}, ma non è stato possibile aggiornare le impostazioni né annullare lo spostamento. Sposta manualmente la cartella in {source} prima di continuare.',
+      yoloBaseDirMigrationManualRepair:
+        'La cartella base YOLO {source} è nascosta ma non può essere migrata automaticamente in sicurezza. Scegli una cartella visibile e sposta manualmente i file YOLO.',
+      yoloBaseDirConflictTitle: 'La cartella base YOLO non è stata spostata',
+      yoloBaseDirConflictMessage:
+        '{target} esiste già e contiene file. Nessun contenuto è stato spostato per evitare sovrascritture o fusioni. Scegli una cartella vuota o inesistente.',
       skillsSourcePath:
-        'Origine: skill integrate + {path}/*.md + {path}/**/SKILL.md',
+        'Origine: skill integrate + {path}/*.md + {path}/<folder>/SKILL.md',
       refreshSkills: 'Aggiorna',
       skillsEmptyHint:
-        'Nessuna skill trovata. Crea file markdown skill sotto {path}.',
+        'Nessuna skill trovata. Crea un file Markdown o una cartella contenente SKILL.md in {path}.',
       createSkillTemplates: 'Inizializza sistema Skills',
       skillsTemplateCreated: 'Sistema Skills inizializzato in {path}.',
       importSkill: 'Importa Skill',
       importSkillDesc:
-        'Importa pacchetti skill in {path}. Supporta file .md singoli o cartelle standard Agent Skills.',
+        'Importa skill in {path}. I file Markdown mantengono il nome; le cartelle mantengono il nome, SKILL.md e tutte le risorse.',
       importSkillDropzoneText: 'Trascina file o cartelle skill qui',
       importSkillBrowseFiles: 'Sfoglia File',
       importSkillBrowseFolder: 'Sfoglia Cartella',
@@ -730,27 +572,14 @@ export const it: TranslationKeys = {
       importSkillSuccess: 'Importate con successo {count} skill.',
       importSkillInvalidFile: 'Nessun file o pacchetto skill valido trovato.',
       importSkillReadError: 'Impossibile leggere i file.',
+      importSkillErrTooDeep:
+        'Il pacchetto skill supera la profondità massima di importazione di {depth}. Non è stato importato nulla.',
       importSkillWriteError: 'Impossibile importare {name}: {error}',
       importSkillErrHeader: '"{name}" non può essere importato:',
       importSkillErrNoSkillMd: 'file SKILL.md mancante nella cartella',
       importSkillErrNoFrontmatter:
         'intestazione metadati (---) mancante in cima al file',
       importSkillErrNoName: 'campo "name" mancante nei metadati',
-      importSkillErrNameTooLong: '"name" troppo lungo (massimo 64 caratteri)',
-      importSkillErrNameUppercase: '"name" deve essere tutto minuscolo',
-      importSkillErrNameHyphenEdge:
-        '"name" non può iniziare o terminare con un trattino',
-      importSkillErrNameDoubleHyphen:
-        '"name" non può contenere trattini consecutivi (--)',
-      importSkillErrNameInvalidChars:
-        '"name" può contenere solo lettere minuscole, numeri e trattini',
-      importSkillErrNameMismatch:
-        '"name" deve corrispondere al nome della cartella',
-      importSkillErrNoDescription: 'campo "description" mancante nei metadati',
-      importSkillErrDescTooLong:
-        '"description" troppo lungo (massimo 1024 caratteri)',
-      importSkillErrCompatTooLong:
-        '"compatibility" troppo lungo (massimo 500 caratteri)',
       importSkillConflictTitle: 'Skill già esistente',
       importSkillConflictMessage:
         'Esiste già una skill con lo stesso nome. Vuoi sovrascriverla?',
@@ -761,15 +590,16 @@ export const it: TranslationKeys = {
       importSkillUnsafePath:
         'Percorso non sicuro rifiutato in "{name}": {path}',
       importSkillDuplicateInBatch:
-        'Nome skill duplicato in questo batch: "{name}" (da "{source}"). Viene mantenuta solo la prima occorrenza.',
+        'Destinazione di importazione duplicata in questo batch: "{name}" (da "{source}"). Viene mantenuta solo la prima occorrenza.',
       deleteSkillTitle: 'Elimina skill',
       deleteSkillMessage:
-        'Sei sicuro di voler eliminare "{name}"? Questa azione non può essere annullata.',
+        'Sei sicuro di voler eliminare il pacchetto skill "{name}", incluse tutte le risorse? Questa azione non può essere annullata.',
       deleteSkillConfirm: 'Elimina',
       deleteSkillSuccess: '"{name}" è stata eliminata.',
       deleteSkillError: 'Impossibile eliminare "{name}": {error}',
+      deleteSkillNotFound: 'Skill non trovata',
       deleteSkillBatchMessage:
-        'Sei sicuro di voler eliminare {count} skill? Questa azione non può essere annullata.',
+        'Sei sicuro di voler eliminare {count} skill, incluse le risorse dei pacchetti? Questa azione non può essere annullata.',
       deleteSkillBatchSuccess: 'Eliminate {count} skill.',
       deleteSkillBatchBtn: 'Elimina',
       deleteSkillSelectAll: 'Seleziona tutto',
@@ -796,14 +626,7 @@ export const it: TranslationKeys = {
       toolsEnabledCount: '{count} abilitati',
       manageTools: 'Gestisci strumenti',
       manageSkills: 'Gestisci competenze',
-      enableToolDisclosure: 'Abilita caricamento strumenti su richiesta (Beta)',
-      enableToolDisclosureDesc:
-        'Gli strumenti opzionali partono con descrizioni brevi, poi caricano i dettagli completi quando servono. Consigliato quando sono abilitati molti strumenti MCP. Nota: questo meccanismo dipende dalle capacità di tool-use del modello — alcuni modelli potrebbero non riconoscere in modo affidabile gli strumenti caricati in questo modo.',
       descriptionColumn: 'Descrizione',
-      builtinFsListLabel: 'Leggi vault',
-      builtinFsListDesc: 'Elenca la struttura delle directory del vault',
-      builtinFsSearchLabel: 'Cerca nel vault',
-      builtinFsSearchDesc: 'Cerca file e contenuti nel vault',
       builtinFsReadLabel: 'Leggi',
       builtinFsReadDesc:
         'Leggi file del vault, skill o pagine web aperte (browser://)',
@@ -818,6 +641,12 @@ export const it: TranslationKeys = {
         'Carica gli schemi completi degli strumenti su richiesta',
       builtinFsEditLabel: 'Modifica testo',
       builtinFsEditDesc: 'Modifica il testo di un singolo file',
+      builtinBashLabel: 'Terminale virtuale',
+      builtinBashDesc:
+        'Cerca e ispeziona i file del vault, più operazioni su percorsi mkdir/mv/rm',
+      builtinVaultSearchLabel: 'Ricerca nel vault',
+      builtinVaultSearchDesc:
+        'Cerca nel vault per significato, combinando il recupero vettoriale delle knowledge base con la corrispondenza per parole chiave.',
       safetyControls: 'Controlli di sicurezza',
       safetyControlsDesc:
         'Configura una revisione aggiuntiva prima che gli agent eseguano operazioni rischiose sui file.',
@@ -827,17 +656,6 @@ export const it: TranslationKeys = {
       builtinFsEditOpsLabel: 'Set modifica file',
       builtinFsEditOpsDesc:
         'Modifica testo mirato o scrive il contenuto completo del file',
-      builtinFsFileOpsLabel: 'Set operazioni percorsi',
-      builtinFsFileOpsDesc: 'Elimina o sposta file e cartelle, e crea cartelle',
-      builtinMemoryOpsLabel: 'Set strumenti memoria',
-      builtinMemoryOpsDesc: 'Aggiungi, aggiorna ed elimina memoria',
-      builtinMemoryAddLabel: 'Aggiungi memoria',
-      builtinMemoryAddDesc:
-        "Aggiunge una memoria globale o dell'assistant con id assegnato automaticamente.",
-      builtinMemoryUpdateLabel: 'Aggiorna memoria',
-      builtinMemoryUpdateDesc: 'Aggiorna una memoria esistente tramite id.',
-      builtinMemoryDeleteLabel: 'Elimina memoria',
-      builtinMemoryDeleteDesc: 'Elimina una memoria esistente tramite id.',
       builtinOpenSkillLabel: 'Apri skill',
       builtinOpenSkillDesc: 'Carica uno skill markdown',
       builtinWebSearchLabel: 'Ricerca web',
@@ -848,18 +666,24 @@ export const it: TranslationKeys = {
         'Recupera il contenuto completo di un singolo URL tramite il provider configurato.',
       builtinWebOpsLabel: 'Set strumenti ricerca web',
       builtinWebOpsDesc: 'Ricerca web e scraping di pagine',
-      builtinJsEvalLabel: 'Esecuzione JavaScript',
+      builtinJsEvalLabel: 'Sandbox di analisi',
       builtinJsEvalDesc:
-        'Esegue JavaScript in un ambiente isolato per gestire compiti su cui gli LLM sono inaffidabili. Può comportare rischi',
+        'Esegue JavaScript in una sandbox isolata per calcoli precisi, statistiche in batch ed elaborazione dati; le capacità di ricerca, lettura del vault e rete si concedono singolarmente.',
       builtinTerminalCommandLabel: 'Comandi del terminale',
       builtinTerminalCommandDesc:
-        'Esegue comandi nel terminale locale. Solo desktop.',
+        'Esegue comandi nel terminale locale, solo desktop',
+      builtinNativeFilesLabel: 'Set strumenti filesystem locale',
+      builtinNativeFilesDesc:
+        'Legge, scrive e modifica file direttamente sul filesystem locale, con qualsiasi percorso ed estensione. Solo desktop e disponibile solo in modalità Max.',
+      builtinReadFileLabel: 'Leggi file locale',
+      builtinWriteFileLabel: 'Scrivi file locale',
+      builtinEditFileLabel: 'Modifica file locale',
       builtinDelegateSubagentLabel: 'Delega a subagent',
       builtinDelegateSubagentDesc:
         'Avvia in modo asincrono un subagent temporaneo e isolato per completare un task autonomo.',
       builtinTodoWriteLabel: 'Lista delle attività',
       builtinTodoWriteDesc:
-        "Consente all'agente di pianificare e tracciare autonomamente i progressi su task in più fasi. Solo modalità agente.",
+        "Consente all'agente di pianificare e tracciare autonomamente i progressi su task in più fasi. Solo modalità Agent e Max.",
       builtinAskUserQuestionLabel: "Chiedi all'utente",
       builtinAskUserQuestionDesc:
         "Chiede all'utente quando mancano informazioni necessarie e riprende dopo la risposta.",
@@ -871,18 +695,11 @@ export const it: TranslationKeys = {
       editorTabSkills: 'Competenze',
       editorTabWorkspace: 'Spazio di lavoro',
       workspace: {
-        enableTitle: "Limita l'accesso alle directory",
+        enableTitle: "Limita l'ambito di lavoro autonomo",
         enableDesc:
-          "Se disattivato, l'agent può accedere all'intero vault. Se attivo, si applicano solo le regole sotto.",
-        includeTitle: 'Consenti',
-        includeDesc: 'Leggi/scrivi solo i file in questi percorsi',
-        includeBadge: 'INCLUDE',
-        includeEmpty:
-          "Lascia vuoto per consentire tutto tranne l'elenco di esclusione sotto.",
-        excludeTitle: 'Nega',
-        excludeDesc: "Escluso dall'intervallo consentito (priorità maggiore)",
-        excludeBadge: 'EXCLUDE',
-        excludeEmpty: 'Nessuna esclusione.',
+          "Se disattivato, l'agent può esplorare e modificare l'intero vault in autonomia. Se attivo, le sue azioni autonome di navigazione e modifica restano entro gli ambiti qui sotto — i file che menzioni con @ o che hai aperto non sono mai limitati.",
+        toolBypassNotice:
+          'Gli agent con comandi da terminale o strumenti MCP di terze parti abilitati possono aggirare questo ambito: non è un confine di sicurezza.',
       },
       editorTabModel: 'Modello',
       editorName: 'Nome',
@@ -895,6 +712,8 @@ export const it: TranslationKeys = {
       editorSystemPrompt: 'System prompt',
       editorSystemPromptDesc:
         'Istruzione comportamentale principale per questo agent.',
+      editorSystemPromptPlaceholder:
+        'Scrivi ![[Nota]] per incorporare il testo completo di quella nota',
       editorSystemPromptExpand: 'Espandi editor',
       editorSystemPromptCollapse: 'Chiudi editor espanso',
       editorEnableProjectInstructions: 'Carica file di istruzioni del progetto',
@@ -908,14 +727,15 @@ export const it: TranslationKeys = {
       toolApproval: 'Approvazione',
       toolApprovalFullAccess: 'Accesso completo',
       toolApprovalRequire: 'Richiedi approvazione',
-      toolDisclosureAuto: 'Auto',
-      toolDisclosureAutoSelect: 'Selezione automatica',
+      toolApprovalDangerousOnly: 'Approva solo operazioni pericolose',
       toolDisclosureAlways: 'In contesto',
       toolDisclosureMixed: 'Misto',
       toolDisclosureOnDemand: 'Su richiesta',
       editorEnabled: 'Abilitato',
       editorDisabled: 'Disabilitato',
       editorModel: 'Modello',
+      editorModelDesc: 'Seleziona il modello usato da questo agent',
+      followDefaultModel: 'Segui modello predefinito',
       editorModelCurrent: 'Corrente: {model}',
       editorTemperature: 'Temperatura',
       editorTemperatureDesc: '0.0 - 2.0',
@@ -949,6 +769,27 @@ export const it: TranslationKeys = {
       imageCompressionQuality: 'Qualità di compressione',
       imageCompressionQualityDesc:
         'Rapporto di compressione immagini (1-100). Controlla sia dimensioni che qualità, es. 60 riduce al 60% con qualità 60%.',
+      cliRuntimesBlockTitle: 'Runtime CLI',
+      claudeCliPathName: 'Percorso CLI di Claude Code',
+      claudeCliPathDesc:
+        'Percorso personalizzato dell\'eseguibile claude — incolla l\'output di "which claude" ("where claude" su Windows). Lascia vuoto per il rilevamento automatico. Salvato solo su questo dispositivo.',
+      codexCliPathName: 'Percorso CLI di Codex',
+      codexCliPathDesc:
+        'Percorso personalizzato dell\'eseguibile codex — incolla l\'output di "which codex" ("where codex" su Windows). Lascia vuoto per il rilevamento automatico. Salvato solo su questo dispositivo.',
+      hermesCliPathName: 'Percorso CLI di Hermes',
+      hermesCliPathDesc:
+        'Percorso personalizzato dell\'eseguibile hermes — incolla l\'output di "which hermes" ("where hermes" su Windows). Lascia vuoto per il rilevamento automatico. Salvato solo su questo dispositivo.',
+      piCliPathName: 'Percorso CLI di Pi',
+      piCliPathDesc:
+        'Percorso personalizzato dell\'eseguibile pi — incolla l\'output di "which pi" ("where pi" su Windows). Lascia vuoto per il rilevamento automatico. Salvato solo su questo dispositivo.',
+      ompCliPathName: 'Percorso CLI di omp',
+      ompCliPathDesc:
+        'Percorso personalizzato dell\'eseguibile omp — incolla l\'output di "which omp" ("where omp" su Windows). Lascia vuoto per il rilevamento automatico. Salvato solo su questo dispositivo.',
+      grokCliPathName: 'Percorso CLI di Grok',
+      grokCliPathDesc:
+        'Percorso personalizzato dell\'eseguibile grok — incolla l\'output di "which grok" ("where grok" su Windows). Lascia vuoto per il rilevamento automatico. Salvato solo su questo dispositivo.',
+      cliPathMissing:
+        'Questo percorso non esiste su questo dispositivo; verrà usato il rilevamento automatico.',
       autoContextCompactionBlockTitle: 'Compattazione contesto',
       autoContextCompaction: 'Compattazione automatica del contesto',
       autoContextCompactionDesc:
@@ -968,6 +809,11 @@ export const it: TranslationKeys = {
       mcpServerDesc:
         'Consenti agli agenti esterni di cercare nel Vault tramite MCP e delegare attivita agli agenti YOLO configurati.',
       mcpServerDesktopOnly: 'Il servizio MCP e disponibile solo su desktop.',
+      mcpServerPort: 'Porta',
+      mcpServerPortDesc:
+        'Porta locale su cui il servizio MCP resta in ascolto. Cambiala se un altro programma o plugin la occupa gia, poi aggiorna la configurazione del client.',
+      mcpServerPortInUse:
+        'La porta {port} e gia in uso, spesso da un altro plugin nello stesso processo di Obsidian come Local REST API. Scegli una porta diversa qui sopra.',
       mcpServerClientConfig: 'Configurazione connessione MCP',
       mcpServerCopyConfig: 'Copia',
       mcpServerError: 'Avvio non riuscito',
@@ -998,9 +844,6 @@ export const it: TranslationKeys = {
       colType: 'Tipo',
       colDefault: 'Predefinito',
       colActions: 'Azioni',
-      deleteConfirmTitle: 'Elimina provider',
-      deleteConfirmMessage:
-        'Sei sicuro di voler eliminare questo provider di ricerca web?',
       deleteFailed: 'Impossibile eliminare il provider.',
       commonHeader: 'Comuni',
       resultSize: 'Numero risultati',
@@ -1027,6 +870,7 @@ export const it: TranslationKeys = {
         'gemini-grounding': 'Gemini (Grounding)',
         grok: 'Grok',
         zhipu: 'Zhipu Web Search',
+        exa: 'Exa',
       },
       fieldName: 'Nome visualizzato',
       fieldApiKey: 'API key',
@@ -1070,6 +914,7 @@ export const it: TranslationKeys = {
       badgeOpenAiCompatible: 'Compatibile OpenAI',
       badgeNative: 'Protocollo nativo',
       badgeOAuth: 'OAuth',
+      badgeSponsor: 'Sponsor',
       badgeAdded: 'Aggiunto',
       providersCount: '{count} provider aggiunti',
       editProvider: 'Modifica provider',
@@ -1092,6 +937,7 @@ export const it: TranslationKeys = {
         'Identificatore univoco per questo provider (ad es., openai, anthropic).',
       providerIdPlaceholder: 'Ad esempio, openai',
       apiKey: 'Chiave API',
+      getApiKey: 'Ottieni chiave API',
       apiKeyDesc: 'La tua chiave API per questo provider.',
       apiKeyPlaceholder: 'Inserisci la tua chiave API',
       baseUrl: 'URL base',
@@ -1119,7 +965,7 @@ export const it: TranslationKeys = {
       responseStreamingModeNonStreaming: 'Non streaming',
       promptCaching: 'Cache del prompt',
       promptCachingDesc:
-        "Abilita la cache effimera dei prompt Anthropic. Riutilizza prompt di sistema, strumenti e cronologia tra i turni per ridurre i token di input. Le scritture in cache hanno un sovrapprezzo del 25%; le letture costano circa il 10% del normale. Disponibile quando il tipo API del provider è Anthropic; l'upstream deve supportare il campo cache_control.",
+        "Cache effimera dei prompt Anthropic, attiva per impostazione predefinita. Riutilizza prompt di sistema, strumenti e cronologia tra i turni per ridurre i token di input. Le scritture in cache hanno un sovrapprezzo del 25%; le letture costano circa il 10% del normale. Disattivala solo se l'endpoint upstream rifiuta o gestisce male il campo cache_control.",
       customHeaders: 'Header personalizzati',
       customHeadersDesc:
         'Aggiungi header HTTP extra a tutte le richieste inviate tramite questo provider.',
@@ -1135,9 +981,27 @@ export const it: TranslationKeys = {
       chatgptOAuthExpires: 'scade',
       chatgptOAuthDisconnectedHelp:
         'Non connesso. Connettiti per usare i modelli del tuo account ChatGPT Plus / Pro.',
-      chatgptOAuthStreamingNotice:
-        'ChatGPT OAuth supporta lo streaming. Con Obsidian requestUrl la risposta viene bufferizzata, mentre il fetch Node desktop puo trasmetterla in tempo reale.',
-      chatgptOAuthPendingCode: 'Codice dispositivo corrente:',
+      chatgptOAuthBrowserLogin: 'Accesso dal browser',
+      chatgptOAuthDeviceLogin: 'Accesso con codice dispositivo',
+      chatgptOAuthBrowserConnecting: 'Apertura del browser...',
+      chatgptOAuthDeviceConnecting: 'In attesa di autorizzazione...',
+      chatgptOAuthBrowserDesktopOnly:
+        "L'accesso dal browser è disponibile solo su desktop.",
+      chatgptOAuthBrowserOpened:
+        "La pagina di accesso a ChatGPT è stata aperta nel browser. Completa lì l'autorizzazione.",
+      chatgptOAuthDeviceOpened:
+        'Inserisci il codice dispositivo seguente nella pagina di autorizzazione di ChatGPT.',
+      chatgptOAuthConnectedNotice: 'ChatGPT OAuth connesso.',
+      chatgptOAuthDisconnectedNotice: 'ChatGPT OAuth disconnesso.',
+      chatgptOAuthPortFallback:
+        "Usa l'accesso con codice dispositivo: non richiede una porta locale.",
+      chatgptOAuthPendingCode: 'Codice dispositivo',
+      chatgptOAuthDeviceHelp:
+        "Inserisci questo codice nella pagina di autorizzazione entro 15 minuti. Continua solo se hai avviato tu l'accesso.",
+      chatgptOAuthCopyCode: 'Copia codice',
+      chatgptOAuthCodeCopied: 'Codice dispositivo copiato.',
+      chatgptOAuthOpenDevicePage: 'Apri pagina di autorizzazione',
+      chatgptOAuthCancelDevice: 'Annulla',
       oauthDesktopOnly:
         'Il login OAuth è disponibile solo su desktop. Collegati prima da desktop.',
       geminiOAuthTitle: 'Gemini OAuth',
@@ -1150,8 +1014,19 @@ export const it: TranslationKeys = {
       geminiOAuthDisconnectedHelp:
         'Non connesso. Connettiti per usare la quota Gemini del tuo account Google.',
       geminiOAuthProject: 'progetto',
-      geminiOAuthStreamingNotice:
-        'Gemini OAuth supporta lo streaming. Con Obsidian requestUrl la risposta viene bufferizzata, mentre il fetch Node desktop puo trasmetterla in tempo reale.',
+      claudeOauthTitle: 'Claude OAuth',
+      claudeOauthTokenName: 'Token OAuth',
+      claudeOauthTokenDesc:
+        'Esegui "claude setup-token" in un terminale e incolla qui il token per chattare con il tuo abbonamento Claude. Questo provider avvia un sottoprocesso claude locale, quindi è disponibile solo su desktop. Incolla un nuovo token quando scade.',
+      claudeOauthClear: 'Cancella',
+      claudeOauthAutoLogin: 'Accesso automatico',
+      claudeOauthAutoLoginConnecting:
+        "Accesso in corso, completa l'autorizzazione nel browser…",
+      claudeOauthAutoLoginSuccess: 'Accesso Claude connesso.',
+      claudeOauthAutoLoginDesktopOnly:
+        "L'accesso automatico è disponibile solo su desktop.",
+      claudeOauthAutoLoginWindowsNotice:
+        "È stata aperta una finestra del terminale per completare l'accesso. Incolla il token stampato nel campo qui sotto una volta terminato.",
     },
     models: {
       title: 'Modelli',
@@ -1210,6 +1085,7 @@ export const it: TranslationKeys = {
         'I modelli aggiunti in blocco usano le impostazioni predefinite; regolali singolarmente in seguito.',
       fetchModelsFailed: 'Impossibile recuperare i modelli',
       embeddingModelsFirst: 'Modelli embedding (prima)',
+      localEmbeddingProviderLabel: 'Locale (sul dispositivo)',
       reasoningType: 'Tipo di ragionamento',
       reasoningTypeDesc: 'Nel dubbio, scegli OpenAI reasoning.',
       reasoningTypeNone: 'Modello non ragionante / predefinito',
@@ -1282,14 +1158,66 @@ export const it: TranslationKeys = {
       noChatModelsConfigured: 'Nessun modello chat configurato',
       noEmbeddingModelsConfigured: 'Nessun modello embedding configurato',
     },
+    scope: {
+      editRange: 'Modifica ambito',
+      currentRules: 'Regole correnti',
+      rulesCount: '{{n}} regole',
+      noRules: {
+        rag: "Nessuna regola: viene indicizzato l'intero vault",
+        agent: "Nessuna regola: l'intero vault è disponibile",
+      },
+      include: 'Includi',
+      exclude: 'Escludi',
+      clearMark: 'Rimuovi il contrassegno',
+      clickAgainToClear: 'Clicca di nuovo per rimuovere',
+      follows: 'Segue «{{name}}»',
+      reasonExcludedAncestor: 'La cartella superiore «{{name}}» è già esclusa',
+      reasonIncludedAncestor: 'Già inclusa dalla cartella superiore «{{name}}»',
+      reset: 'Reimposta',
+      resetTitle:
+        "Ripristina l'ambito predefinito e rimuovi tutte le regole personalizzate",
+      onlyWithRules: 'Solo con regole',
+      searchFolders: 'Cerca cartelle…',
+      searchFoldersOrFiles: 'Cerca cartelle o file…',
+      noMatch: {
+        rag: 'Nessuna cartella corrispondente',
+        agent: 'Nessuna cartella o file corrispondente',
+      },
+      noRuleYet: 'Ancora nessuna regola',
+      fileLabel: 'File',
+      fileCount: '{{n}} file',
+      modalTitle: {
+        rag: "Modifica l'ambito di indicizzazione",
+        agent: "Modifica l'ambito dello spazio di lavoro",
+      },
+      modalSubtitle: {
+        rag: 'Passa il mouse su una cartella per contrassegnarla Includi / Escludi; clicca di nuovo per rimuovere.',
+        agent:
+          'Puoi arrivare al singolo file; i file seguono la loro cartella per impostazione predefinita.',
+      },
+      status: {
+        rag: {
+          all: "Indicizza l'intero vault",
+          only: 'Indicizza solo {{items}}',
+        },
+        agent: {
+          all: "L'intero vault è disponibile",
+          only: 'Disponibili solo {{items}}',
+        },
+        excludeSuffix: ', escludendo {{items}}',
+        excludeWithinSuffix: ', escludendo {{items}} al suo interno',
+        folders: '{{n}} cartelle',
+        files: '{{n}} file',
+        joiner: ', ',
+        estimate: {
+          rag: '≈ {{n}} / {{total}} note',
+          agent: '{{n}} / {{total}} file raggiungibili',
+        },
+      },
+    },
     rag: {
-      title: 'RAG (Retrieval Augmented Generation)',
+      title: 'Knowledge base',
       desc: "Gestisci gli indici della knowledge base. Il RAG viene attivato automaticamente quando l'Agent usa lo strumento Ricerca in modalità Ibrida o RAG.",
-      enableRag: 'Abilita RAG',
-      enableRagDesc:
-        "Crea l'indice per i documenti inclusi nell'ambito selezionato.",
-      partialFailureSummary: 'Completato · {{count}} file non indicizzabili',
-      embeddingModel: 'Modello embedding',
       embeddingModelDesc:
         'Modello usato per generare embeddings per la ricerca semantica.',
       chunkSize: 'Dimensione chunk',
@@ -1302,139 +1230,140 @@ export const it: TranslationKeys = {
       embeddingConcurrency: 'Concorrenza embedding',
       embeddingConcurrencyDesc:
         "Numero massimo di richieste di embedding in parallelo durante l'indicizzazione (1–24, predefinito 10). Riducilo se il provider restituisce errori 429 / limite di frequenza.",
-      includePatterns: 'Pattern di inclusione',
-      includePatternsDesc:
-        "Pattern glob per i file da includere nell'indice (uno per riga).",
-      excludePatterns: 'Pattern di esclusione',
-      excludePatternsDesc:
-        "Pattern glob per i file da escludere dall'indice (uno per riga).",
-      testPatterns: 'Testa pattern',
-      manageEmbeddingDatabase: 'Gestisci database embedding',
+      vectorDataSize: 'Dati vettoriali (MB)',
+      inMemoryIndexEstimate: 'Indice in memoria (MB)',
       manage: 'Gestisci',
-      rebuildIndex: 'Ricostruisci indice',
-      rebuildFromScratch: 'Ricostruisci da zero',
-      rebuildFromScratchConfirm:
-        "Verranno eliminati tutti i vettori esistenti del modello di embedding corrente e l'intero vault verrà reindicizzato, con possibili numerose chiamate API. Continuare?",
-      continueIndex: 'Continua indicizzazione',
-      continueIndexNow: 'Continua ora',
-      selectedFolders: 'Cartelle selezionate',
-      excludedFolders: 'Cartelle escluse',
-      selectFoldersPlaceholder: 'Seleziona cartelle...',
-      selectFilesOrFoldersPlaceholder: 'Seleziona file o cartelle...',
-      selectExcludeFoldersPlaceholder: 'Seleziona cartelle da escludere...',
-      conflictNoteDefaultInclude: 'Nota: per default tutti i file sono inclusi',
-      conflictExact:
-        'Conflitto: questo percorso è sia incluso che escluso esplicitamente',
-      conflictParentExclude:
-        'Conflitto: una cartella genitore è esclusa, quindi questa inclusione è inefficace',
-      conflictChildExclude:
-        'Conflitto: cartelle figlio sono incluse, quindi questa esclusione è parzialmente inefficace',
-      conflictRule: 'Regola di conflitto',
-      autoUpdate: 'Aggiornamento automatico',
-      autoUpdateDesc:
-        "Quando è attivo, aggiorna incrementalmente l'indice in background dopo le modifiche ai documenti.",
+      advanced: 'Impostazioni avanzate',
       indexPdf: 'Indicizza file PDF',
       indexPdfDesc:
         'Estrae e indicizza il testo dei PDF per la knowledge base. La prima ricostruzione completa può richiedere più tempo; disattiva per vault molto grandi se non ti serve il recupero sui PDF.',
-      autoUpdateInterval: 'Intervallo aggiornamento automatico',
-      autoUpdateIntervalDesc:
-        "Tempo di attesa (in millisecondi) dopo che un file viene modificato prima di aggiornare l'indice.",
-      manualUpdateNow: 'Aggiorna ora',
-      manualUpdateNowDesc:
-        "Aggiorna manualmente l'indice per i file modificati dall'ultimo aggiornamento.",
-      advanced: 'Impostazioni avanzate',
-      basicCardTitle: 'Knowledge base',
-      basicCardDesc:
-        "Controlla l'indicizzazione della knowledge base, il modello di embedding e le relative azioni di manutenzione.",
-      resourceCardTitle: 'Risorse PGlite',
-      resourceCardDesc:
-        'Gestisce le risorse runtime del database necessarie alla base di conoscenza.',
-      scopeCardTitle: 'Ambito di ricerca',
-      scopeCardDesc:
-        "Specifica quali cartelle includere o escludere dall'indicizzazione.",
-      maintenanceCardTitle: 'Stato e manutenzione',
-      maintenanceCardDesc:
-        'Mostra lo stato corrente della knowledge base e consente le operazioni di manutenzione necessarie.',
-      maintenanceUnavailableHint:
-        "Prepara prima le risorse PGlite qui sopra per usare la manutenzione dell'indice o il database embedding.",
-      currentStatus: 'Stato corrente',
-      currentStatusDesc:
-        "Quando la knowledge base è attiva, l'indice viene mantenuto in background in base all'impostazione di aggiornamento automatico.",
-      lastIndexedAt: 'Ultima sincronizzazione',
-      lastIndexedAtDesc:
-        "L'ultima volta in cui l'indicizzazione o una sincronizzazione in background è terminata con successo.",
-      maintenanceActions: 'Azioni di manutenzione',
-      deleteIndex: 'Elimina indice corrente',
-      deleteIndexConfirm:
-        "Vuoi eliminare tutti i dati d'indice per il modello di embedding attualmente selezionato?",
-      deleteIndexSuccess: "L'indice corrente è stato eliminato.",
-      deleteIndexFailed: "Impossibile eliminare l'indice corrente.",
-      statusDisabled: 'Disattivato',
-      statusSyncing: 'Sincronizzazione in background',
-      statusRuntimeRequired: 'In attesa delle risorse database',
-      statusReady: 'Attivo',
-      statusEmpty: 'Nessun indice disponibile',
       selectEmbeddingModelFirst:
         "Seleziona prima un modello di embedding, poi attiva l'indicizzazione della knowledge base.",
-      openKnowledgeSettings: 'Apri impostazioni knowledge base',
-      openKnowledgeSettingsDesc:
-        'Vai alle impostazioni per gestire indice, ambito, stato e opzioni avanzate.',
-      composerEntryDesc:
-        'L’indicizzazione della knowledge base ora è gestita nella pagina impostazioni; qui resta solo un accesso rapido.',
-      pgliteStatusCurrent: 'Stato attuale',
-      pgliteStatusSource: 'Origine risorsa',
-      pgliteStatusPath: 'Percorso risorsa',
-      pgliteStatusCheckedAt: 'Ultimo controllo',
-      pgliteStatusVersion: 'Versione runtime',
-      pgliteStatusReadyAt: 'Ultima preparazione',
-      pgliteStatusReason: 'Dettagli',
-      pgliteStateUnchecked: 'Non registrato',
-      pgliteStateChecking: 'Controllo in corso',
-      pgliteStateMissing: 'Non scaricato',
-      pgliteStateDownloading: 'Download in corso',
-      pgliteStateUnavailable: 'Non disponibile',
-      pgliteStateFailed: 'Preparazione fallita',
-      pgliteStateReady: 'Pronto',
-      pgliteSourceRemote: 'Cache remota',
-      pgliteSourceBundled: 'Incluso nel plugin',
-      pgliteSourceLocalCache: 'Cache locale',
-      pgliteDeliveryManual: 'Download manuale',
-      pgliteDownload: 'Scarica risorse',
-      pgliteRedownload: 'Scarica di nuovo',
-      pgliteRecheck: 'Controlla di nuovo',
-      pgliteDeleteLocal: 'Elimina risorse locali',
-      pgliteDownloadPlaceholder:
-        'Qui verrà collegato il punto di download manuale delle risorse PGlite remote.',
-      pgliteDeletePlaceholder:
-        'Qui verrà collegato il punto di eliminazione delle risorse locali di PGlite.',
-      pgliteDownloadingUnknownFile: 'file runtime',
-      pgliteInlineErrorTitle: 'Download non riuscito',
-      pgliteSummaryReadyRemote:
-        "Le risorse runtime di PGlite sono pronte e possono essere usate per l'indicizzazione e la gestione del database embedding.",
-      pgliteSummaryReadyBundled:
-        'Il plugin sta ancora usando risorse PGlite integrate. Dopo il passaggio alla distribuzione remota, questa scheda mostrerà lo stato della cache locale e ospiterà il download manuale.',
-      pgliteSummaryUnavailable:
-        'Le risorse runtime di PGlite non sono disponibili. La manutenzione dell’indice e la gestione del database embedding resteranno disabilitate finché le risorse non saranno pronte.',
-      pgliteSummaryReady:
-        "Le risorse runtime di PGlite sono pronte e possono essere usate per l'indicizzazione e la gestione del database embedding.",
-      pgliteSummaryDownloading:
-        'Le risorse runtime di PGlite sono in preparazione. Al termine del download, la manutenzione dell’indice e la gestione del database embedding torneranno disponibili automaticamente.',
-      pgliteSummaryFailed:
-        'La preparazione del runtime PGlite non è riuscita. Riprova il download oppure svuota la cache locale prima di usare di nuovo le funzioni knowledge base.',
-      pgliteSummaryMissing:
-        'Le risorse runtime di PGlite non sono ancora state preparate. Verranno scaricate automaticamente al primo uso della knowledge base, oppure puoi prepararle qui manualmente.',
-      pgliteDownloadingFile: 'Download',
-      indexProgressTitle: 'Progresso indicizzazione',
-      indexing: 'Indicizzazione in corso...',
-      notStarted: 'Non iniziato',
       waitingRateLimit: 'In attesa del reset del limite di frequenza...',
       preparingProgress: 'Preparazione indicizzazione...',
-      notIndexedYet: 'Non ancora indicizzato',
-      indexComplete: 'Indicizzazione completata',
-      indexIncomplete: 'Ultima indicizzazione non completata',
-      retryNow: 'Riprova ora',
-      waitingRetry: 'In attesa di un nuovo tentativo...',
       cancelIndex: 'Annulla',
+      cancellingIndex: 'Annullamento…',
+      // Status bar (RAGSection)
+      indexingDisabled: "L'indicizzazione della knowledge base è disattivata",
+      indexingDisabledSub:
+        "Lo strumento Ricerca dell'Agent userà solo la ricerca per parole chiave. Scegli un modello di embedding qui sotto, poi attiva l'indicizzazione.",
+      indexingProgress: 'Indicizzazione di {{kb}} in corso',
+      indexedCount: '{{n}} documento/i indicizzati',
+      autoUpdate: 'Aggiornamento automatico',
+      updateNow: 'Aggiorna ora',
+      previousRunInterrupted:
+        "L'ultima indicizzazione non è terminata correttamente.",
+    },
+    knowledgeBases: {
+      title: 'Knowledge base',
+      new: 'Nuova knowledge base',
+      emptyState: 'Nessuna knowledge base ancora creata',
+      count: '{{n}} knowledge base',
+      queuedCount: '{{n}} knowledge base in coda',
+      pendingCount: '{{n}} aggiornamento/i in sospeso',
+      attentionCount: '{{n}} knowledge base richiedono attenzione',
+      embeddingModelLine: 'Modello embedding {{model}}',
+      embeddingModelShelf: 'Modello embedding',
+      embeddingModelShelfDesc:
+        'Condiviso da tutte le knowledge base · cambiarlo richiede una ricostruzione completa',
+      embeddingModelApiRow: 'Modello API',
+      embeddingModelApiRowMeta:
+        '{{dimension}} dim · fatturato per token · chiavi e modelli personalizzati nella scheda Modelli',
+      setAsCurrent: 'Imposta come corrente',
+      stateReady: 'Pronta',
+      stateIndexing: 'In indicizzazione',
+      statePending: 'Aggiornamento in sospeso',
+      stateQueued: 'In coda',
+      stateAttention: 'Richiede attenzione',
+      docs: 'Documenti',
+      chunks: 'Chunk',
+      pendingFiles: '{{n}} file modificati',
+      lastUpdated: 'Ultimo aggiornamento {{time}}',
+      enableAndIndex: 'Attiva e indicizza',
+      disable: 'Disattiva indicizzazione',
+      rebuildThis: 'Ricostruisci questa base',
+      rebuildAll: 'Ricostruisci tutti gli indici',
+      manageDataTitle: 'Gestisci dati indicizzati',
+      noIndexedData: 'Nessun indice disponibile',
+      manageModelColumn: 'Modello',
+      manageEmbeddingsColumn: 'Embedding totali',
+      manageActionsColumn: 'Azioni',
+      manageRefresh: 'Aggiorna',
+      manageRemoveIndex: 'Rimuovi indice',
+      removeIndexFailed: "Impossibile rimuovere l'indice",
+      localEmbedding: {
+        groupLabel: 'Locale',
+        groupDesc:
+          'Eseguito sul tuo dispositivo: le note non lasciano questo computer.',
+        desktopOnly:
+          'I modelli di embedding locali sono disponibili solo su desktop.',
+        metaLine: '{{dimension}} dim · {{size}}',
+        download: 'Scarica',
+        downloadingLine: 'Download {{percent}}% · {{received}} / {{total}}',
+        verifying: 'Verifica dei file…',
+        failedLine: 'Download non riuscito: {{error}}',
+        readyLine: 'Scaricato',
+        current: 'Attuale',
+        viewSource: 'Origine',
+        sourceRepoLabel: 'Repository',
+        sourceRevisionLabel: 'Revisione',
+        sourceFilesLabel: 'File',
+        confirmDelete: 'Clicca di nuovo per eliminare',
+        endpointLabel: 'Origine download',
+        endpointCustomOption: 'Personalizzato',
+        endpointCustomPlaceholder: 'https://example.com',
+        endpointCustomInvalid: 'Inserisci un indirizzo http/https valido',
+        engineModelNotDownloaded: 'Modello di embedding locale non scaricato',
+        engineModelNotDownloadedSub:
+          "Scarica il modello nelle impostazioni della Knowledge Base per usare l'embedding locale.",
+        engineDownloadAction: 'Scarica modello',
+        engineModelDownloadingLine:
+          'Download del modello di embedding locale {{percent}}%',
+        engineModelVerifying:
+          'Verifica dei file del modello di embedding locale…',
+        engineModelFailedLine:
+          'Download del modello di embedding locale non riuscito: {{error}}',
+        engineComponentDisabled: 'Il motore di embedding locale è disattivato',
+        engineComponentDisabledSub:
+          "Attiva il motore di embedding per usare l'embedding locale.",
+        engineEnableAction: 'Attiva',
+        engineEnableFailed: 'Impossibile attivare il motore di embedding',
+        engineComponentFailed:
+          'Inizializzazione del motore di embedding locale non riuscita',
+        engineComponentPreparing:
+          'Il motore di embedding locale si sta preparando…',
+        engineNonDesktop: "L'embedding locale non è disponibile",
+        engineNonDesktopSub:
+          'I modelli di embedding locali funzionano solo su desktop.',
+        languageNames: {
+          en: 'Inglese',
+          zh: 'Cinese',
+          multilingual: 'Multilingua',
+        },
+        dtypeBadge: {
+          q8: 'INT8',
+          fp16: 'FP16',
+        },
+      },
+      delete: 'Elimina knowledge base',
+      deleteConfirm:
+        'Verranno eliminati la knowledge base "{{name}}" e tutti i suoi dati indicizzati. L\'operazione non è reversibile.',
+      createTitle: 'Nuova knowledge base',
+      editTitle: 'Knowledge base · {{name}}',
+      fieldName: 'Nome',
+      fieldNameDesc: 'Il nome visualizzato di questa knowledge base',
+      fieldDescription: 'Descrizione',
+      fieldDescriptionDesc:
+        'Descrivi cosa contiene principalmente questa base. Questo testo viene fornito al modello per aiutarlo a scegliere la knowledge base giusta da consultare; è facoltativo.',
+      fieldDescriptionPlaceholder:
+        'Es. Verbali riunioni quotidiane e documenti dei progetti in corso',
+      scopeTitle: 'Ambito',
+      scopeDesc: 'Decide quali cartelle entrano in questa knowledge base.',
+      nameRequired: 'Inserisci un nome per la knowledge base',
+      nameDuplicate: 'Esiste già una knowledge base con questo nome',
+      saveFailed: 'Impossibile salvare la knowledge base',
+      deleteTitle: 'Elimina knowledge base',
+      deleteFailed: 'Impossibile eliminare la knowledge base',
     },
     mcp: {
       title: 'Strumenti personalizzati (MCP)',
@@ -1536,30 +1465,15 @@ export const it: TranslationKeys = {
       },
     },
     continuation: {
-      title: 'Continuazione',
+      title: 'Sparkle',
       aiSubsectionTitle: 'Continuazione AI',
-      customSubsectionTitle: 'Continuazione personalizzata',
       tabSubsectionTitle: 'Completamento Tab',
-      superContinuation: 'Super continuazione',
+      superContinuation: 'Abilita vista Sparkle',
       superContinuationDesc:
-        'Abilita la vista Sparkle nella barra laterale per la configurazione avanzata della continuazione.',
+        'Abilita la vista Sparkle nella barra laterale per configurare modelli, parametri, regole e fonti di riferimento dedicati alla continuazione. Se disabilitata, resta disponibile solo la vista Chat.',
       continuationModel: 'Modello di continuazione',
       continuationModelDesc:
-        'Modello usato per generare testo di continuazione.',
-      smartSpaceDescription:
-        'Smart Space ti aiuta a continuare a scrivere con azioni rapide personalizzabili. Di default si apre con spazio su riga vuota o "/" + spazio; qui sotto puoi passare al doppio spazio o disattivare il trigger con spazio.',
-      smartSpaceToggle: 'Abilita smart space',
-      smartSpaceToggleDesc:
-        'Mostra il menu smart space quando il cursore è su una riga vuota.',
-      smartSpaceTriggerMode: 'Trigger spazio su riga vuota',
-      smartSpaceTriggerModeDesc:
-        'Cosa deve fare Smart Space quando premi spazio su una riga vuota.',
-      smartSpaceTriggerModeSingle:
-        'Spazio singolo per aprire (comportamento originale)',
-      smartSpaceTriggerModeDouble:
-        'Doppio spazio per aprire (~600ms; il primo spazio inserisce davvero uno spazio)',
-      smartSpaceTriggerModeOff:
-        'Disattiva trigger con spazio su riga vuota (solo "/" + spazio)',
+        'Seleziona il modello usato per la continuazione in Sparkle.',
       selectionChatSubsectionTitle: 'Cursor chat',
       selectionChatDescription:
         'Offre azioni rapide sul testo selezionato, come chiedere, riscrivere o spiegare.',
@@ -1602,9 +1516,12 @@ export const it: TranslationKeys = {
       tabCompletion: 'Completamento tab',
       tabCompletionDesc:
         'Genera suggerimenti quando una regola trigger corrisponde.',
+      tabCompletionMultipleCandidates: 'Genera più suggerimenti',
+      tabCompletionMultipleCandidatesDesc:
+        'Quando attivo, genera tre suggerimenti di completamento.',
       tabCompletionModel: 'Modello completamento tab',
       tabCompletionModelDesc:
-        'Modello usato per generare suggerimenti di completamento tab.',
+        'Modello usato per il completamento tab e la regolazione della lunghezza.',
       tabCompletionTriggerDelay: 'Ritardo trigger (ms)',
       tabCompletionTriggerDelayDesc:
         'Quanto tempo attendere dopo che smetti di digitare prima di generare un suggerimento.',
@@ -1637,9 +1554,9 @@ export const it: TranslationKeys = {
       tabCompletionTemperature: 'Temperatura',
       tabCompletionTemperatureDesc:
         'Controlla la casualità dei suggerimenti (0 = deterministico, 1 = creativo).',
-      tabCompletionRequestTimeout: 'Timeout richiesta (ms)',
+      tabCompletionRequestTimeout: 'Timeout richiesta (secondi)',
       tabCompletionRequestTimeoutDesc:
-        'Quanto tempo attendere una risposta dal modello prima del timeout.',
+        'Interrompe la richiesta di completamento se supera questo numero di secondi. Aumentalo per modelli più lenti o con ragionamento lungo.',
       tabCompletionConstraints: 'Vincoli completamento tab',
       tabCompletionConstraintsDesc:
         'Regole opzionali inserite nel prompt di completamento tab (ad esempio "scrivi in italiano" o "segui uno stile specifico").',
@@ -1652,16 +1569,23 @@ export const it: TranslationKeys = {
       tabCompletionTriggerTypeString: 'Stringa',
       tabCompletionTriggerTypeRegex: 'Regex',
       tabCompletionTriggerPattern: 'Pattern',
+      tabCompletionTriggerAcceptMode: 'Comportamento di accettazione',
+      tabCompletionTriggerAcceptModeInsert: 'Inserisci al cursore',
+      tabCompletionTriggerAcceptModeReplace:
+        'Sostituisci il testo corrispondente',
       tabCompletionTriggerDescription: 'Descrizione',
       tabCompletionTriggerRemove: 'Rimuovi',
     },
     etc: {
       title: 'Altro',
+      pluginUpdateNotice: 'Notifiche di aggiornamento',
+      pluginUpdateNoticeDesc:
+        'Se attivo, YOLO controlla le nuove versioni e te lo segnala.',
       pluginAutoUpdate: 'Scarica aggiornamenti automaticamente',
       pluginAutoUpdateDesc:
         'Se attivo, le nuove versioni rilevate vengono scaricate automaticamente in background.',
       pluginAutoUpdateDescUnavailable:
-        'L’installazione con un clic è disponibile solo su desktop con cartella plugin scrivibile. Su questo dispositivo aggiorna tramite Community plugins o GitHub.',
+        'Gli aggiornamenti dei moduli vengono scaricati automaticamente; l’installazione del Core con un clic richiede ancora desktop e una cartella plugin scrivibile.',
       resetSettings: 'Ripristina impostazioni',
       resetSettingsDesc:
         'Ripristina tutte le impostazioni ai valori predefiniti.',
@@ -1697,17 +1621,27 @@ export const it: TranslationKeys = {
       captureRawRequestDebug: 'Abilita debug richieste LLM',
       captureRawRequestDebugDesc:
         "Quando attivo, ogni risposta del modello mostra un pulsante Debug (nella barra info e nel menu Altre azioni) che consente di consultare o esportare le richieste e risposte raw di LLM, chiamate strumento e ricerche web di quel turno. I dati catturati restano in memoria solo per la sessione corrente di Obsidian e vengono cancellati al riavvio. Le chiavi API sono offuscate nell'export, ma il contenuto originale della conversazione è incluso.",
-      captureRawRequestDebugExcludeLogsTitle:
-        'Escludere i log di debug dalla knowledge base?',
-      captureRawRequestDebugExcludeLogsMessage:
-        'I log di debug possono contenere il contenuto raw della conversazione e degli strumenti. Aggiungere {{path}} alla lista di esclusione della knowledge base per evitare che vengano indicizzati dal RAG?',
-      captureRawRequestDebugExcludeLogsCta: 'Escludi log',
-      captureRawRequestDebugExcludeLogsSuccess:
-        '{{path}} è stato escluso dalla knowledge base.',
       yoloBaseDir: 'Cartella base YOLO',
       yoloBaseDirDesc:
         'Inserisci un percorso relativo al vault (senza / iniziale). Esempio: YOLO nella radice del vault, oppure setting/YOLO nella cartella setting. Directory skill attuale: {path}.',
       yoloBaseDirPlaceholder: 'YOLO',
+      yoloBaseDirHiddenPath:
+        'La cartella base YOLO non può usare cartelle nascoste. Rimuovi il punto iniziale dal nome, ad esempio cambia .yolo in yolo.',
+      yoloBaseDirInvalidPath:
+        'La cartella base YOLO contiene un nome non supportato su tutti i dispositivi. Evita caratteri di controllo, nomi riservati di Windows e i caratteri <>:"\\|?*.',
+      yoloBaseDirMigrated:
+        'La cartella base YOLO ora usa {target}, che Obsidian può indicizzare.',
+      yoloBaseDirMigrationConflict:
+        'La cartella base YOLO non è stata spostata perché {target} esiste già. Le impostazioni esistenti sono state mantenute.',
+      yoloBaseDirMigrationFailed:
+        'Impossibile migrare la cartella base YOLO. Le impostazioni esistenti sono state mantenute.',
+      yoloBaseDirMigrationRollbackFailed:
+        'YOLO è stato spostato da {source} a {target}, ma non è stato possibile aggiornare le impostazioni né annullare lo spostamento. Sposta manualmente la cartella in {source} prima di continuare.',
+      yoloBaseDirMigrationManualRepair:
+        'La cartella base YOLO {source} è nascosta ma non può essere migrata automaticamente in sicurezza. Scegli una cartella visibile e sposta manualmente i file YOLO.',
+      yoloBaseDirConflictTitle: 'La cartella base YOLO non è stata spostata',
+      yoloBaseDirConflictMessage:
+        '{target} esiste già e contiene file. Nessun contenuto è stato spostato per evitare sovrascritture o fusioni. Scegli una cartella vuota o inesistente.',
       ribbonClickAction: 'Icona ribbon apre la chat in',
       ribbonClickActionDesc:
         'Dove l’icona ribbon di YOLO apre la vista Chat. Se nella posizione scelta esiste già una chat viene attivata; altrimenti ne viene creata una nuova.',
@@ -1716,6 +1650,9 @@ export const it: TranslationKeys = {
       ribbonClickActionSplit: 'Split destro',
       ribbonClickActionWindow: 'Nuova finestra',
       ribbonClickActionLast: 'Ultima posizione usata',
+      enterKeyCreatesNewline: 'Usa Invio per andare a capo',
+      enterKeyCreatesNewlineDesc:
+        'Si applica ai campi di Chat e Quick Ask. Premi Cmd/Ctrl + Invio per inviare.',
       mentionDisplayMode: 'Posizione visualizzazione mention',
       mentionDisplayModeDesc:
         "Scegli se mostrare i file selezionati con @ e le skill selezionate con / nel testo dell'input o come badge sopra la casella.",
@@ -1765,11 +1702,18 @@ export const it: TranslationKeys = {
   },
 
   chat: {
+    ribbonMenu: {
+      openInSidebar: 'Apri nella barra laterale',
+      openInTab: 'Apri in una scheda',
+      openInSplit: 'Apri in divisione',
+      openInWindow: 'Apri in una finestra',
+    },
     placeholder:
       'Scrivi un messaggio...「@ per aggiungere riferimenti o modelli, / per scegliere una skill o un comando」',
     placeholderCompact: 'Clicca per espandere e modificare...',
     placeholderPrefix: 'Scrivi un messaggio...',
     placeholderMention: 'aggiungere riferimenti o modelli',
+    placeholderMentionReferences: 'aggiungere riferimenti',
     placeholderSkill: 'scegliere una skill o un comando',
     contextUsage: 'Utilizzo finestra di contesto',
     contextUsageUnknownMaxSuffix:
@@ -1816,11 +1760,29 @@ export const it: TranslationKeys = {
     sendMessage: 'Invia messaggio',
     newChat: 'Nuova chat',
     untitledConversation: 'Nuova chat',
+    paneTitle: {
+      renameAriaLabel: 'Clicca per rinominare la conversazione',
+      editingAriaLabel: 'Modifica del titolo della conversazione',
+    },
+    paneMenu: {
+      rename: 'Rinomina',
+      deleteConfirmTitle: 'Eliminare la conversazione?',
+      deleteConfirmMessage:
+        'Questo eliminerà definitivamente "{title}". Questa azione non può essere annullata.',
+    },
     continueResponse: 'Continua risposta',
     messageNavigator: {
       title: 'Navigatore messaggi',
       itemAriaLabel: 'Vai al messaggio {index}: {label}',
       emptyMessage: 'Messaggio vuoto',
+    },
+    mermaidControls: {
+      open: 'Apri visualizzatore diagramma',
+      zoomOut: 'Riduci',
+      zoomIn: 'Ingrandisci',
+      fitViewport: 'Adatta alla finestra',
+      reset: 'Reimposta zoom',
+      controlsLabel: 'Controlli diagramma',
     },
     stopGeneration: 'Ferma generazione',
     queueMessage: {
@@ -1858,9 +1820,11 @@ export const it: TranslationKeys = {
     selectModel: 'Seleziona modello',
     uploadImage: 'Carica immagine',
     uploadFile: 'Aggiungi file',
-    dropFilesHint: 'Rilascia per aggiungere file',
+    dropFilesHint: 'Rilascia per aggiungere alla conversazione',
     imageUnsupportedByModel:
       'Questo modello non dichiara il supporto alle immagini. Abilita la modalità di input "Vision" nelle impostazioni del modello per allegare immagini.',
+    imageUnsupportedByRuntime:
+      'Questo runtime CLI non accetta input di immagini.',
     unsupportedFileType: 'Tipo di file non supportato: {names}',
     processImagesFailed: 'Impossibile elaborare le immagini caricate',
     readPdfFailed: 'Impossibile leggere il PDF "{name}": {error}',
@@ -1875,22 +1839,26 @@ export const it: TranslationKeys = {
     noAssistantContent: 'Nessun contenuto assistente da inserire',
     regenerate: 'Rigenera',
     reasoning: 'Ragionamento',
+    reasonedFor: 'Ha ragionato per {{seconds}} s',
     annotations: 'Annotazioni',
     vaultSources: 'Fonti dal vault ({count})',
     pdfReferenceNoPreview: '(PDF: clicca il titolo per aprire la pagina)',
     assistantQuote: {
       add: 'Cita',
       badge: 'Citazione risposta',
+      commentPlaceholder: 'Aggiungi un commento…',
+      save: 'Salva commento',
+      delete: 'Elimina commento',
+      inputLabel: 'Annotazione {index}',
     },
     mentionMenu: {
-      back: 'Torna indietro',
       entryCurrentFile: 'File corrente',
       entryMode: 'Modalita',
-      entrySkill: 'Skill',
       entryAssistant: 'Assistente',
       entryModel: 'Modello',
       entryFile: 'File',
       entryFolder: 'Cartella',
+      categoryEmpty: 'Ancora nulla qui',
     },
     slashCommands: {
       compact: {
@@ -1898,10 +1866,22 @@ export const it: TranslationKeys = {
         description:
           'Comprimi manualmente la cronologia precedente e continua il task corrente in una nuova finestra di contesto.',
       },
+      openPluginManager: {
+        label: 'Gestisci plugin',
+        description:
+          'Gestisci i plugin di Claude Code installati o installane di nuovi da un marketplace.',
+      },
+      openMcpServers: {
+        label: 'Server MCP',
+        description:
+          'Visualizza lo stato dei server MCP della sessione corrente.',
+      },
     },
     slashMenu: {
       entrySkill: 'Abilità',
       entrySnippet: 'Snippet',
+      categoryCommand: 'Comandi',
+      categoryEmpty: 'Ancora nulla qui',
       createSnippetsFile: 'Clicca per creare snippets.md',
     },
     emptyState: {
@@ -1915,9 +1895,88 @@ export const it: TranslationKeys = {
       agentTitle: "Lascia eseguire all'AI",
       agentDescription:
         'Abilita gli strumenti per ricerca, lettura/scrittura e task multi-step.',
-      agentFullTitle: "Lascia eseguire all'AI · Modalità YOLO",
+      agentFullTitle: "Lascia eseguire all'AI · YOLO",
       agentFullDescription:
         'Approva automaticamente gli strumenti per ricerca, lettura/scrittura e task multi-step.',
+      maxTitle: 'Collaborare, oltre il vault',
+      maxDescription: 'Qualsiasi file, un terminale vero.',
+      maxFullTitle: 'Collaborare, oltre il vault · YOLO',
+      maxFullDescription:
+        'Qualsiasi file, un terminale vero. Porta a termine il lavoro in fretta.',
+    },
+    cliSurface: {
+      emptyTitle: 'Usa CLI Agent',
+      emptyDescription:
+        'Collega un agent CLI supportato per eseguire attività complesse su questo dispositivo.',
+      emptyUserMessage: 'Messaggio vuoto',
+      error: 'Errore della sessione CLI: {message}',
+      runtimeError: 'Impossibile avviare il runtime CLI: {message}',
+      submitError: 'Impossibile inviare il messaggio CLI: {message}',
+      cancelError: 'Impossibile interrompere la CLI: {message}',
+      openError: 'Impossibile aprire la sessione CLI: {message}',
+      transitionError:
+        'Impossibile lasciare la sessione CLI corrente: {message}',
+      sessionFallbackDividerTitle: 'Passato al profilo predefinito',
+      sessionFallbackDividerDescription:
+        'L\'agente originale "{profile}" non è disponibile, quindi questa conversazione è passata al profilo predefinito: i messaggi precedenti non fanno parte della sua memoria.',
+      sessionFallbackUnknownProfile: 'precedente',
+    },
+    hermesProfileSelector: {
+      accessibleLabel: 'Profilo Hermes: {profile}',
+    },
+    cliControls: {
+      defaultModel: 'Modello predefinito di {provider}',
+      loadError: 'Impossibile caricare i modelli CLI: {message}',
+      updateError: 'Impossibile aggiornare la configurazione CLI: {message}',
+    },
+    claudePlugins: {
+      title: 'Gestisci plugin',
+      placeholder: 'Caricamento informazioni sui plugin…',
+      tabInstalled: 'Installati',
+      tabBrowse: 'Sfoglia',
+      loadError: 'Impossibile caricare le informazioni sui plugin.',
+      cliFallback:
+        'Operazione plugin non riuscita. Gestisci i plugin dal terminale con claude plugin.',
+      updateRestartRequired:
+        'Plugin aggiornato. Avvia una nuova sessione perché la modifica abbia effetto.',
+      installedEmpty: 'Nessun plugin installato.',
+      browseEmpty: 'Nessun plugin corrispondente trovato.',
+      searchPlaceholder: 'Cerca plugin…',
+      update: 'Aggiorna',
+      uninstall: 'Disinstalla',
+      install: 'Installa',
+      installedBadge: 'Installato',
+      uninstallConfirmTitle: 'Disinstalla plugin',
+      uninstallConfirmMessage:
+        'Disinstallare "{name}"? Questa azione non può essere annullata.',
+      scopeUser: 'Utente',
+      scopeProject: 'Progetto',
+      scopeLocal: 'Locale',
+      installCount: '{count} installazioni',
+    },
+    mcpServers: {
+      title: 'Server MCP',
+      placeholder: 'Caricamento stato dei server MCP…',
+      refresh: 'Aggiorna',
+      reconnect: 'Riconnetti',
+      toolCount: '{count} strumenti',
+      statusConnected: 'Connesso',
+      statusFailed: 'Connessione non riuscita',
+      statusNeedsAuth: 'Accesso richiesto',
+      statusPending: 'Connessione in corso',
+      statusDisabled: 'Disattivato',
+      statusUnknown: 'Stato sconosciuto',
+      empty: 'Nessun server MCP configurato per questa sessione.',
+      loadError: 'Impossibile caricare lo stato dei server MCP.',
+      noActiveSession:
+        'Nessuna sessione attiva. Invia un messaggio per avviare una sessione CLI.',
+      actionError: 'Operazione non riuscita: {error}',
+      runtimeSwitched:
+        'Il runtime è cambiato, quindi questa azione è stata annullata.',
+      codexReadOnlyNote:
+        'Lo stato dei server MCP di Codex è di sola lettura qui. Gestisci i server dal terminale.',
+      codexUnsupportedVersion:
+        'Questa versione di Codex CLI non supporta la query dello stato dei server MCP. Aggiorna Codex CLI.',
     },
     quickAccess: {
       manage: 'Gestisci accessi rapidi',
@@ -1968,31 +2027,9 @@ export const it: TranslationKeys = {
       emptyPlanPreview: 'Questo piano rimuove contenuto',
       stopApplying: 'Interrompi applicazione',
     },
-    customContinuePromptLabel: 'Come vuoi continuare?',
-    customContinuePromptPlaceholder:
-      "Chiedi all'AI (@ per i file, # per le azioni rapide)",
-    customContinueHint:
-      'Shift+Invio per inviare, Invio per nuova riga, Esc per chiudere',
-    customContinueConfirmHint: 'Invia la tua istruzione per continuare',
     customRewritePromptPlaceholder:
       'Descrivi come riscrivere il testo selezionato, ad es. "rendi conciso e voce attiva; mantieni la struttura markdown"; premi shift+invio per confermare, invio per una nuova riga, ed esc per chiudere.',
     customContinueProcessing: 'Elaborazione...',
-    customContinueError: 'Impossibile generare la continuazione',
-    customContinuePresets: {
-      continue: {
-        label: 'Continua a scrivere',
-        instruction: 'Continua il testo corrente nello stesso stile e tono.',
-      },
-      summarize: {
-        label: 'Riassumi',
-        instruction: 'Scrivi un riassunto conciso del contenuto corrente.',
-      },
-      flowchart: {
-        label: 'Crea un diagramma di flusso',
-        instruction:
-          'Trasforma i punti correnti in un diagramma di flusso o passaggi ordinati.',
-      },
-    },
     customContinueSections: {
       suggestions: {
         title: 'Suggerimenti',
@@ -2074,9 +2111,46 @@ export const it: TranslationKeys = {
       fileDeleted:
         'Questo file e stato eliminato. Usa annulla per ripristinarlo.',
       fileMissing: 'Il file non esiste piu o e stato spostato.',
+      snapshotUnavailable:
+        'Questo dispositivo non ha uno snapshot di quella modifica, quindi non puo essere annullata ne revisionata. Gli snapshot restano sul dispositivo che ha fatto la modifica.',
+      reviewOutsideVault:
+        'Questo file si trova fuori dal vault, quindi non puo essere revisionato nell editor. Annulla funziona comunque.',
     },
     errorCard: {
       title: 'Questa risposta non e stata generata',
+      connectionInterruptedContinuable:
+        'La connessione al servizio del modello si e interrotta. La risposta parziale e ancora disponibile: fai clic su Continua risposta per riprendere.',
+      viewDetails: 'Mostra dettagli errore',
+      hideDetails: 'Nascondi dettagli errore',
+      goToSettings: 'Vai alle impostazioni',
+      diagnosis: {
+        auth: 'La chiave API non e valida. Controllala e riconfigura il provider.',
+        region:
+          'Il servizio non e disponibile nella tua area. Configura un proxy o passa a un provider disponibile.',
+        model: 'Il modello non esiste o non hai i permessi per accedervi.',
+        quota:
+          'Il credito dell account e esaurito. Ricarica o passa a un altro provider.',
+        rateLimit:
+          'Troppe richieste in poco tempo. Attendi un momento e riprova, oppure passa a un modello con limiti piu alti.',
+        contextLength:
+          'Il contesto della conversazione e troppo lungo. Elimina i messaggi precedenti o avvia una nuova chat.',
+        payload: 'La richiesta e troppo grande. Invia meno file o meno testo.',
+        content:
+          'Il contenuto e stato bloccato da un sistema di sicurezza. Modificalo e riprova.',
+        mcp: 'Impossibile raggiungere il server MCP. Verifica che sia in esecuzione.',
+        stream:
+          'La trasmissione della risposta si e interrotta. Controlla la stabilita della rete o riprova.',
+        network:
+          'Impossibile raggiungere il server. Controlla la rete o le impostazioni del proxy.',
+        proxy:
+          'Errore di proxy o certificato SSL. Controlla le impostazioni di proxy e rete.',
+        server: 'Il servizio del modello ha un problema. Riprova piu tardi.',
+        deprecated:
+          'Questo modello e stato ritirato o deprecato. Passa a un altro modello.',
+        knowledge: 'Vettorizzazione della base di conoscenza non riuscita.',
+        parse:
+          'Il modello ha restituito una risposta non valida. Riprova o cambia modello.',
+      },
       responseFormat: {
         responseNotObject:
           'Il servizio modello ha restituito una risposta che non e un oggetto (valore effettivo: {{actual}}).',
@@ -2109,26 +2183,19 @@ export const it: TranslationKeys = {
         unknown: 'Sconosciuto',
       },
       displayName: {
-        fs_list: 'Elenca file',
-        fs_search: 'Cerca nel vault',
         fs_read: 'Leggi file',
         fs_edit: 'Modifica testo',
         fs_edit_ops: 'Set modifica file',
-        fs_file_ops: 'Set operazioni percorsi',
-        memory_add: 'Aggiungi memoria',
-        memory_update: 'Aggiorna memoria',
-        memory_delete: 'Elimina memoria',
+        bash: 'Bash',
         open_skill: 'Apri skill',
+      },
+      dangerousBash: {
+        title: 'Operazione pericolosa da confermare',
+        rmSummary: 'Sto per eliminare i seguenti percorsi (nel cestino):',
+        mvSummary: 'Sto per spostare/rinominare i seguenti percorsi:',
       },
       writeAction: {
         write: 'Scrivi file',
-        delete: 'Elimina',
-        create_dir: 'Crea cartella',
-        move: 'Sposta percorso',
-        // Chiavi legacy mantenute per le conversazioni storiche.
-        create_file: 'Crea file',
-        delete_file: 'Elimina file',
-        delete_dir: 'Elimina cartella',
       },
       readMode: {
         full: 'Intero testo',
@@ -2152,6 +2219,15 @@ export const it: TranslationKeys = {
       abort: 'Interrompi',
       alwaysAllowThisTool: 'Consenti sempre questo strumento',
       allowForThisChat: 'Consenti per questa chat',
+      outsideVaultNotice: 'Questo percorso è fuori dal vault: {path}',
+      approvePlan: 'Approva il piano',
+      stayInPlan: 'Resta in modalità piano',
+      editDiff: {
+        originalUnavailable:
+          "Il contenuto precedente alla modifica non è disponibile su questo dispositivo; qui sotto c'è solo il contenuto scritto da questa chiamata.",
+        collapsedLines: '⋯ {{count}} righe invariate nascoste',
+        truncatedLines: 'Altre {{count}} righe non mostrate',
+      },
     },
     toolSummary: {
       todoWrite: {
@@ -2165,6 +2241,22 @@ export const it: TranslationKeys = {
         sessionKill: 'Sessione {id} · Termina',
         sessionInput: 'Sessione {id} · Input: {preview}',
       },
+    },
+    toolRunSummary: {
+      read: 'Letti {count} file',
+      search: 'Eseguite {count} ricerche',
+      web: '{count} ricerche web',
+      edit: 'Modificati {count} file',
+      editedFile: 'Modificato {name}',
+      createdFile: 'Creato {name}',
+      deletedFile: 'Eliminato {name}',
+      virtualTerminal: 'Terminale virtuale {count} volte',
+      terminal: 'Terminale {count} volte',
+      command: 'Eseguiti {count} comandi',
+      analysis: '{count} analisi in sandbox',
+      other: '{count} altre azioni',
+      toolSet: '{name} {count} volte',
+      toolSetSingle: '{name} · {tool}',
     },
     liveTask: {
       statusRunning: 'In esecuzione',
@@ -2180,12 +2272,15 @@ export const it: TranslationKeys = {
       truncated: 'Output troncato.',
     },
     subagent: {
+      defaultTitle: 'Subagent',
       openDetails: 'Visualizza dettagli subagent',
+      loadingActivity: 'Caricamento attività…',
       planningNextMoves: 'Pianificazione prossimi passi',
       noActivity: 'Nessuna attività.',
       statusCompleted: 'Completato',
       statusAborted: 'Interrotto',
       statusFailed: 'Fallito',
+      statusDispatched: 'Inviato',
       toolUseCount: '{count} strumenti',
       tokenCount: '{count} token',
       approval: {
@@ -2231,10 +2326,6 @@ export const it: TranslationKeys = {
     continueFailed: 'Indicizzazione ripresa fallita.',
     openYoloNewChatFailed:
       'Impossibile aprire la finestra chat YOLO; prova prima dal palette comandi.',
-    pgliteUnavailable:
-      'Runtime PGlite non disponibile; riprova a scaricare le risorse runtime.',
-    downloadingPglite:
-      'Download delle risorse runtime PGlite in corso; il primo utilizzo della knowledge base potrebbe richiedere un momento…',
     updatingIndex: 'Aggiornamento indice vault in corso…',
     indexUpdated: 'Indice vault aggiornato.',
     indexUpdateFailed: 'Aggiornamento indice vault fallito.',
@@ -2273,17 +2364,15 @@ export const it: TranslationKeys = {
     agentStatusRunning: 'In esecuzione',
     agentStatusWaitingApproval: 'In attesa di approvazione',
     agentStatusFallbackConversationTitle: 'Conversazione in esecuzione',
+    cliStatusRunning: 'In esecuzione',
+    cliStatusWaitingApproval: 'In attesa di approvazione',
+    cliStatusWaitingUser: 'In attesa di input',
     backgroundStatusPanelTitle: 'Attivita e promemoria',
     backgroundStatusPanelEmpty: 'Non ci sono attivita o promemoria',
     backgroundTasksRunning:
       'Al momento ci sono {count} attivita in background in esecuzione',
     backgroundTasksNeedAttention:
       "Un'attivita in background richiede attenzione",
-    learningTasksRunning:
-      'La modalita apprendimento ha {count} attivita in esecuzione',
-    learningReviewLabel: 'YOLO Learning: oggi {count} carte da ripassare',
-    learningReviewTitle: 'YOLO Learning',
-    learningReviewDetail: '{count} carte da ripassare',
     ragAutoUpdateRunning: 'La knowledge base si sta aggiornando in background',
     ragAutoUpdateRunningDetail:
       "Sincronizzazione incrementale dell'indice della knowledge base in corso.",
@@ -2307,16 +2396,20 @@ export const it: TranslationKeys = {
     reviewTitle: 'Rivedi modifiche',
     changesResolved: 'modifiche risolte',
     acceptAllIncoming: 'Accetta tutte in arrivo',
+    acceptAllChanges: 'Accetta tutte le modifiche',
     keepAllChanges: 'Mantieni tutto',
     rejectAll: 'Rifiuta tutte',
+    rejectAllChanges: 'Rifiuta tutte le modifiche',
     revertAllChanges: 'Ripristina tutto',
     prevChange: 'Modifica precedente',
     nextChange: 'Modifica successiva',
     reset: 'Ripristina',
     applyAndClose: 'Applica e chiudi',
     acceptIncoming: 'Accetta in arrivo',
+    acceptChange: 'Accetta modifica',
     keepChange: 'Mantieni questa modifica',
     acceptCurrent: 'Accetta corrente',
+    rejectChange: 'Rifiuta modifica',
     revertChange: 'Ripristina questa modifica',
     acceptBoth: 'Accetta entrambe',
     acceptedIncoming: 'In arrivo accettata',
@@ -2333,6 +2426,8 @@ export const it: TranslationKeys = {
     noAssistantDescription: 'Usa prompt di sistema predefinito',
     navigationHint: '↑↓ per navigare, Invio per selezionare, Esc per annullare',
     inputPlaceholder: 'Fai una domanda...',
+    continuePlaceholder:
+      'Lascia vuoto per continuare a scrivere, oppure aggiungi istruzioni...',
     close: 'Chiudi',
     copy: 'Copia',
     insert: 'Inserisci',
@@ -2345,22 +2440,13 @@ export const it: TranslationKeys = {
     error: 'Impossibile generare la risposta',
     copied: 'Copiato negli appunti',
     inserted: 'Inserito al cursore',
-    modeAsk: 'Chiedi',
-    modeEdit: 'Modifica',
-    modeEditDirect: 'Modifica (Accesso completo)',
-    modeAskDesc: 'Fai domande e ottieni risposte',
-    modeEditDesc: 'Modifica il documento corrente',
-    modeEditDirectDesc: 'Modifica il documento direttamente senza conferma',
-    editNoFile: 'Apri prima un file',
-    editNoChanges: 'Nessuna modifica valida restituita dal modello',
+    rewriteSelectionExpired:
+      'La selezione non è più disponibile. Seleziona nuovamente il testo.',
     editPartialSuccess:
       'Applicate {appliedCount} di {totalEdits} modifiche. Controlla la console per i dettagli.',
-    editApplied:
-      'Applicate con successo {appliedCount} modifica/modifiche a {fileName}',
     statusRequesting: 'Richiesta in corso...',
     statusThinking: 'Sto pensando...',
     statusGenerating: 'Sto generando...',
-    statusModifying: 'Sto modificando...',
   },
 
   chatMode: {
@@ -2372,12 +2458,18 @@ export const it: TranslationKeys = {
     rewriteDesc: 'Modifica solo la selezione corrente',
     agent: 'Agent',
     agentDesc: 'Strumenti per task complessi',
+    max: 'Max',
+    maxDesc: 'Opera direttamente su file locali e terminale (solo desktop)',
+    continue: 'Scrivi',
+    continueDesc: 'Continua a scrivere al cursore, premi Tab per accettare',
     agentFull: 'Agent (YOLO)',
     agentFullDesc:
       'Approva automaticamente le chiamate agli strumenti per task complessi',
     yolo: 'YOLO',
     yoloDesc:
       'Approva automaticamente le chiamate agli strumenti per task complessi',
+    maxYoloDesc:
+      'Approva automaticamente ogni chiamata agli strumenti, inclusi i percorsi fuori dal vault e i comandi terminal in scrittura',
     fullAccessWarning: {
       title: 'Conferma prima di abilitare la Modalità YOLO',
       description:
@@ -2446,6 +2538,7 @@ export const it: TranslationKeys = {
     repairAndReload: 'Ripara e ricarica',
     downloadUpdate: 'Scarica aggiornamento',
     downloading: 'Download {{progress}}%',
+    backgroundDownloading: 'Download in background…',
     installAndReload: 'Installa e ricarica',
     applying: 'Installazione…',
     downloadFailed: 'Download non riuscito',
@@ -2454,5 +2547,9 @@ export const it: TranslationKeys = {
     updateInCommunityPlugins: 'Aggiorna dai plugin community',
     manualInstallOnGitHub:
       'Non riesci ad aggiornare? Installa manualmente da GitHub',
+  },
+  moduleFileView: {
+    inactivePlaceholder:
+      'Questo tipo di file è fornito da un modulo attualmente non attivo.',
   },
 }

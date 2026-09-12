@@ -7,6 +7,7 @@ import { AzureOpenAIProvider } from './azureOpenaiProvider'
 import { BaseLLMProvider } from './base'
 import { BedrockProvider } from './bedrockProvider'
 import { ChatGPTOAuthProvider } from './chatgptOAuthProvider'
+import { ClaudeOAuthProvider } from './claudeOAuthProvider'
 import { DeepSeekAnthropicProvider } from './deepseekAnthropicProvider'
 import { DeepSeekStudioProvider } from './deepseekStudioProvider'
 import { LLMModelNotFoundException } from './exception'
@@ -23,6 +24,7 @@ import { OpenAICompatibleProvider } from './openaiCompatibleProvider'
 import { OpenAIResponsesProvider } from './openaiResponsesProvider'
 import { OpenRouterProvider } from './openRouterProvider'
 import { PerplexityProvider } from './perplexityProvider'
+import { withProviderErrorReporting } from './providerErrors'
 import { resolveModelRequestPolicy } from './requestPolicy'
 import { AutoPromotedTransportMode } from './requestTransport'
 import { XiaomimimoProvider } from './xiaomimimoProvider'
@@ -33,7 +35,7 @@ import { XiaomimimoProvider } from './xiaomimimoProvider'
  * Groq and Ollama currently do not support usage statistics for streaming responses.
  */
 
-export function getProviderClient({
+function createProviderClient({
   settings,
   providerId,
   onAutoPromoteTransportMode,
@@ -64,6 +66,9 @@ export function getProviderClient({
       })
     }
     case 'anthropic': {
+      if (provider.presetType === 'claude-oauth') {
+        return new ClaudeOAuthProvider(provider)
+      }
       if (provider.presetType === 'moonshot') {
         return new MoonshotAnthropicProvider(provider as never, {
           requestPolicy,
@@ -178,6 +183,17 @@ export function getProviderClient({
       }
     }
   }
+}
+
+export function getProviderClient(args: {
+  settings: YoloSettings
+  providerId: string
+  onAutoPromoteTransportMode?: (
+    providerId: string,
+    mode: AutoPromotedTransportMode,
+  ) => void
+}): BaseLLMProvider<LLMProvider> {
+  return withProviderErrorReporting(createProviderClient(args), args.providerId)
 }
 
 export function getChatModelClient({

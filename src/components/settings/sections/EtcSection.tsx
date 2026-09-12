@@ -10,20 +10,17 @@ import {
 } from '../../../constants'
 import { useLanguage } from '../../../contexts/language-context'
 import { useSettings } from '../../../contexts/settings-context'
-import { ensureJsonDbRootDir } from '../../../core/paths/yoloManagedData'
+import { isPortableVaultPathSegment } from '../../../core/paths/portableVaultPath'
+import { ensureUserDataRootDir } from '../../../core/paths/yoloManagedData'
+import { hasHiddenYoloBaseDirSegment } from '../../../core/paths/yoloPaths'
+import { clearAllEditReviewSnapshotStores } from '../../../database/edit-review/editReviewSnapshotStore'
 import { ChatManager } from '../../../database/json/chat/ChatManager'
-import { clearAllEditReviewSnapshotStores } from '../../../database/json/chat/editReviewSnapshotStore'
 import { clearImageCache } from '../../../database/json/chat/imageCacheStore'
 import { clearPdfTextCache } from '../../../database/json/chat/pdfTextCacheStore'
 import { clearAllPromptSnapshotStores } from '../../../database/json/chat/promptSnapshotStore'
-import { clearAllTimelineHeightCacheStores } from '../../../database/json/chat/timelineHeightCacheStore'
 import { CHAT_DIR } from '../../../database/json/constants'
-import YoloPlugin from '../../../main'
+import type YoloPlugin from '../../../main'
 import { yoloSettingsSchema } from '../../../settings/schema/setting.types'
-import {
-  folderPathsToIncludePatterns,
-  includePatternsToFolderPaths,
-} from '../../../utils/rag-utils'
 import { ObsidianButton } from '../../common/ObsidianButton'
 import { ObsidianSetting } from '../../common/ObsidianSetting'
 import { ObsidianTextInput } from '../../common/ObsidianTextInput'
@@ -42,27 +39,8 @@ type StorageUsage = {
 }
 
 const CHAT_SNAPSHOT_DIR = 'chat_snapshots'
-const EDIT_REVIEW_SNAPSHOT_DIR = 'edit_review_snapshots'
-const TIMELINE_HEIGHT_CACHE_DIR = 'timeline_height_cache'
 const IMAGE_CACHE_DIR = 'image_cache'
 const PDF_CACHE_DIR = 'pdf_cache'
-const DEBUG_LOGS_DIR = 'YOLO/logs'
-/** Legacy cache dir from removed delegate_external_agent tool. */
-const LEGACY_EXTERNAL_AGENT_PROGRESS_DIR = 'external_agent_progress'
-
-const clearLegacyExternalAgentProgressDir = async (
-  app: App,
-  settings: Parameters<typeof ensureJsonDbRootDir>[1],
-): Promise<void> => {
-  const rootDir = await ensureJsonDbRootDir(app, settings)
-  const path = normalizePath(
-    `${rootDir}/${CHAT_DIR}/${LEGACY_EXTERNAL_AGENT_PROGRESS_DIR}`,
-  )
-  if (await app.vault.adapter.exists(path)) {
-    await app.vault.adapter.rmdir(path, true)
-  }
-}
-
 const formatBytes = (bytes: number): string => {
   if (bytes < 1024) {
     return `${bytes} B`
@@ -109,39 +87,28 @@ const getPathSize = async (app: App, path: string): Promise<number> => {
 
 const loadStorageUsage = async (
   app: App,
-  settings: Parameters<typeof ensureJsonDbRootDir>[1],
+  settings: Parameters<typeof ensureUserDataRootDir>[1],
 ): Promise<StorageUsage> => {
-  const rootDir = await ensureJsonDbRootDir(app, settings)
+  const rootDir = await ensureUserDataRootDir(app, settings)
   const chatDir = normalizePath(`${rootDir}/${CHAT_DIR}`)
 
+  // 编辑评审快照不在这里计量：它已经不在 vault 里，而是设备本地的 IndexedDB
+  // 库（`database/edit-review/editReviewSnapshotStore.ts`），Obsidian 的
+  // adapter 看不到它的体积。
   const [
     chatHistoryBytes,
     promptSnapshotBytes,
-    editReviewSnapshotBytes,
-    timelineHeightCacheBytes,
     imageCacheBytes,
     pdfCacheBytes,
-    agentProgressBytes,
   ] = await Promise.all([
     getPathSize(app, chatDir),
     getPathSize(app, normalizePath(`${chatDir}/${CHAT_SNAPSHOT_DIR}`)),
-    getPathSize(app, normalizePath(`${chatDir}/${EDIT_REVIEW_SNAPSHOT_DIR}`)),
-    getPathSize(app, normalizePath(`${chatDir}/${TIMELINE_HEIGHT_CACHE_DIR}`)),
     getPathSize(app, normalizePath(`${chatDir}/${IMAGE_CACHE_DIR}`)),
     getPathSize(app, normalizePath(`${chatDir}/${PDF_CACHE_DIR}`)),
-    getPathSize(
-      app,
-      normalizePath(`${chatDir}/${LEGACY_EXTERNAL_AGENT_PROGRESS_DIR}`),
-    ),
   ])
 
   const snapshotAndCacheBytes =
-    promptSnapshotBytes +
-    editReviewSnapshotBytes +
-    timelineHeightCacheBytes +
-    imageCacheBytes +
-    pdfCacheBytes +
-    agentProgressBytes
+    promptSnapshotBytes + imageCacheBytes + pdfCacheBytes
 
   return {
     chatHistoryBytes: Math.max(0, chatHistoryBytes - snapshotAndCacheBytes),
@@ -159,6 +126,9 @@ const StorageBadge = ({ value }: { value: number | null }) => {
   )
 }
 
+const normalizeYoloBaseDirInput = (value: string): string =>
+  normalizePath(value.trim()).replace(/^\/+/, '') || 'YOLO'
+
 export function EtcSection({ app, plugin, className }: EtcSectionProps) {
   const { settings, setSettings } = useSettings()
   const { t } = useLanguage()
@@ -169,6 +139,20 @@ export function EtcSection({ app, plugin, className }: EtcSectionProps) {
     chatSnapshotBytes: null,
   })
   const [yoloBaseDirInput, setYoloBaseDirInput] = useState(yoloBaseDir)
+  const normalizedYoloBaseDirInput = normalizeYoloBaseDirInput(yoloBaseDirInput)
+  const yoloBaseDirError = hasHiddenYoloBaseDirSegment(yoloBaseDirInput)
+    ? t(
+        'settings.etc.yoloBaseDirHiddenPath',
+        'YOLO root cannot use hidden folders. Remove the dot at the beginning of the folder name, for example change .yolo to yolo.',
+      )
+    : normalizedYoloBaseDirInput
+          .split('/')
+          .some((segment) => !isPortableVaultPathSegment(segment))
+      ? t(
+          'settings.etc.yoloBaseDirInvalidPath',
+          'YOLO root contains a folder name that is not supported across devices. Avoid control characters, Windows reserved names, and the characters <>:"\\|?*.',
+        )
+      : null
 
   useEffect(() => {
     setYoloBaseDirInput(yoloBaseDir)
@@ -201,54 +185,47 @@ export function EtcSection({ app, plugin, className }: EtcSectionProps) {
   useEffect(() => refreshStorageUsage(), [refreshStorageUsage])
 
   const handleYoloBaseDirBlur = (value: string) => {
-    const normalized = normalizePath(value.trim()).replace(/^\/+/, '') || 'YOLO'
+    const normalized = normalizeYoloBaseDirInput(value)
     setYoloBaseDirInput(normalized)
-    if (normalized === yoloBaseDir) return
-
-    void setSettings({
-      ...settings,
-      yolo: {
-        ...(settings.yolo ?? { baseDir: 'YOLO' }),
-        baseDir: normalized,
-      },
-    })
-  }
-
-  const isDebugLogsExcludedFromKnowledgeBase = (): boolean => {
-    return includePatternsToFolderPaths(
-      settings.ragOptions.excludePatterns,
-    ).includes(DEBUG_LOGS_DIR)
-  }
-
-  const excludeDebugLogsFromKnowledgeBase = async () => {
-    const currentSettings = plugin.settings
-    const excludeFolders = includePatternsToFolderPaths(
-      currentSettings.ragOptions.excludePatterns,
-    )
-    if (excludeFolders.includes(DEBUG_LOGS_DIR)) {
+    if (
+      hasHiddenYoloBaseDirSegment(normalized) ||
+      normalized
+        .split('/')
+        .some((segment) => !isPortableVaultPathSegment(segment))
+    ) {
       return
     }
+    if (normalized === yoloBaseDir) return
 
-    await setSettings({
-      ...currentSettings,
-      debug: {
-        ...currentSettings.debug,
-        captureRawRequestDebug: true,
-      },
-      ragOptions: {
-        ...currentSettings.ragOptions,
-        excludePatterns: folderPathsToIncludePatterns([
-          ...excludeFolders,
-          DEBUG_LOGS_DIR,
-        ]),
-      },
-    })
-    new Notice(
-      t('settings.etc.captureRawRequestDebugExcludeLogsSuccess').replace(
-        '{{path}}',
-        DEBUG_LOGS_DIR,
-      ),
+    void Promise.resolve(
+      setSettings({
+        ...settings,
+        yolo: {
+          ...(settings.yolo ?? { baseDir: 'YOLO' }),
+          baseDir: normalized,
+        },
+      }),
     )
+      .catch((error: unknown) => {
+        console.error('[YOLO] Failed to change YOLO root', error)
+        new Notice(t('common.error', 'Something went wrong.'))
+      })
+      .finally(() => {
+        setYoloBaseDirInput(plugin.settings.yolo.baseDir)
+      })
+  }
+
+  const handlePluginUpdateNoticeChange = (value: boolean) => {
+    void (async () => {
+      try {
+        await setSettings({
+          ...settings,
+          pluginUpdateNoticeEnabled: value,
+        })
+      } catch (error: unknown) {
+        console.error('Failed to update plugin update notice setting', error)
+      }
+    })()
   }
 
   const handlePluginAutoUpdateChange = (value: boolean) => {
@@ -264,43 +241,18 @@ export function EtcSection({ app, plugin, className }: EtcSectionProps) {
     })()
   }
 
+  // Debug logs live under the YOLO base dir, which every knowledge base's
+  // engine now excludes unconditionally (see `getYoloBaseDir` usage in
+  // `core/rag/ragCoordinator.ts`) — no per-base exclude rule is needed for
+  // them anymore.
   const handleCaptureRawRequestDebugChange = (value: boolean) => {
-    const shouldPromptExcludeLogs =
-      value && !isDebugLogsExcludedFromKnowledgeBase()
-    const updateDebugSettingPromise = Promise.resolve(
-      setSettings({
-        ...settings,
-        debug: {
-          ...settings.debug,
-          captureRawRequestDebug: value,
-        },
-      }),
-    )
-
-    if (shouldPromptExcludeLogs) {
-      new ConfirmModal(app, {
-        title: t('settings.etc.captureRawRequestDebugExcludeLogsTitle'),
-        message: t(
-          'settings.etc.captureRawRequestDebugExcludeLogsMessage',
-        ).replace('{{path}}', DEBUG_LOGS_DIR),
-        ctaText: t('settings.etc.captureRawRequestDebugExcludeLogsCta'),
-        cancelText: t('common.cancel', 'Cancel'),
-        onConfirm: () => {
-          void (async () => {
-            await updateDebugSettingPromise
-            await excludeDebugLogsFromKnowledgeBase()
-          })().catch((error: unknown) => {
-            console.error(
-              'Failed to exclude debug logs from knowledge base',
-              error,
-            )
-            new Notice(t('common.error'))
-          })
-        },
-      }).open()
-    }
-
-    void updateDebugSettingPromise.catch((error: unknown) => {
+    void setSettings({
+      ...settings,
+      debug: {
+        ...settings.debug,
+        captureRawRequestDebug: value,
+      },
+    }).catch((error: unknown) => {
       console.error('Failed to update raw request debug setting', error)
       new Notice(t('common.error'))
     })
@@ -394,11 +346,9 @@ export function EtcSection({ app, plugin, className }: EtcSectionProps) {
       onConfirm: () => {
         void (async () => {
           await clearAllPromptSnapshotStores(app, settings)
-          await clearAllEditReviewSnapshotStores(app, settings)
-          await clearAllTimelineHeightCacheStores(app, settings)
+          await clearAllEditReviewSnapshotStores(app)
           await clearImageCache(app, settings)
           await clearPdfTextCache(app, settings)
-          await clearLegacyExternalAgentProgressDir(app, settings)
           const nextUsage = await loadStorageUsage(app, settings)
           setStorageUsage(nextUsage)
           new Notice(t('settings.etc.clearChatSnapshotsSuccess'))
@@ -447,26 +397,41 @@ export function EtcSection({ app, plugin, className }: EtcSectionProps) {
 
         <div className="yolo-settings-block-content">
           <ObsidianSetting
-            name={t('settings.etc.pluginAutoUpdate', '自动下载更新')}
-            desc={
-              Platform.isDesktop && canSelfUpdate
-                ? t(
-                    'settings.etc.pluginAutoUpdateDesc',
-                    '开启后检测到新版本会自动在后台加载。',
-                  )
-                : t(
-                    'settings.etc.pluginAutoUpdateDescUnavailable',
-                    '一键安装仅在桌面端且插件目录可写时可用；当前设备请通过社区插件或 GitHub 手动更新。',
-                  )
-            }
+            name={t('settings.etc.pluginUpdateNotice', '更新提醒')}
+            desc={t(
+              'settings.etc.pluginUpdateNoticeDesc',
+              '开启后 YOLO 会自动检测新版本并提醒。',
+            )}
             className="yolo-settings-card"
           >
             <ObsidianToggle
-              value={settings.pluginUpdateAutoDownloadEnabled ?? true}
-              onChange={handlePluginAutoUpdateChange}
-              disabled={!Platform.isDesktop || !canSelfUpdate}
+              value={settings.pluginUpdateNoticeEnabled ?? true}
+              onChange={handlePluginUpdateNoticeChange}
             />
           </ObsidianSetting>
+
+          {(settings.pluginUpdateNoticeEnabled ?? true) ? (
+            <ObsidianSetting
+              name={t('settings.etc.pluginAutoUpdate', '自动下载更新')}
+              desc={
+                Platform.isDesktop && canSelfUpdate
+                  ? t(
+                      'settings.etc.pluginAutoUpdateDesc',
+                      '开启后检测到新版本会自动在后台加载。',
+                    )
+                  : t(
+                      'settings.etc.pluginAutoUpdateDescUnavailable',
+                      '开启后会自动下载模块更新；主插件的一键安装仅在桌面端且插件目录可写时可用。',
+                    )
+              }
+              className="yolo-settings-card"
+            >
+              <ObsidianToggle
+                value={settings.pluginUpdateAutoDownloadEnabled ?? true}
+                onChange={handlePluginAutoUpdateChange}
+              />
+            </ObsidianSetting>
+          ) : null}
 
           <ObsidianSetting
             name={t('settings.etc.exportConfig', '导出配置')}
@@ -508,21 +473,30 @@ export function EtcSection({ app, plugin, className }: EtcSectionProps) {
             />
           </ObsidianSetting>
 
-          <ObsidianSetting
-            name={t('settings.etc.yoloBaseDir', 'YOLO 根目录')}
-            desc={t(
-              'settings.etc.yoloBaseDirDesc',
-              '用于存放 YOLO 管理文件的库内相对目录（例如：Config/YOLO）。技能将从 {path} 加载。',
-            ).replace('{path}', `${yoloBaseDir}/skills`)}
-            className="yolo-settings-card"
+          <div
+            className={`yolo-settings-field ${yoloBaseDirError ? 'is-invalid' : ''}`}
           >
-            <ObsidianTextInput
-              value={yoloBaseDirInput}
-              placeholder={t('settings.etc.yoloBaseDirPlaceholder', 'YOLO')}
-              onChange={setYoloBaseDirInput}
-              onBlur={handleYoloBaseDirBlur}
-            />
-          </ObsidianSetting>
+            <ObsidianSetting
+              name={t('settings.etc.yoloBaseDir', 'YOLO 根目录')}
+              desc={t(
+                'settings.etc.yoloBaseDirDesc',
+                '用于存放 YOLO 管理文件的库内相对目录（例如：Config/YOLO）。技能将从 {path} 加载。',
+              ).replace('{path}', `${yoloBaseDir}/skills`)}
+              className="yolo-settings-card"
+            >
+              <ObsidianTextInput
+                value={yoloBaseDirInput}
+                placeholder={t('settings.etc.yoloBaseDirPlaceholder', 'YOLO')}
+                onChange={setYoloBaseDirInput}
+                onBlur={handleYoloBaseDirBlur}
+              />
+            </ObsidianSetting>
+            {yoloBaseDirError && (
+              <div className="yolo-settings-inline-error" role="alert">
+                {yoloBaseDirError}
+              </div>
+            )}
+          </div>
 
           <ObsidianSetting
             name={t('settings.etc.captureRawRequestDebug')}

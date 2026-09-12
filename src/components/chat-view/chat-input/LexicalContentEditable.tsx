@@ -14,6 +14,8 @@ import { $getRoot, LexicalEditor, SerializedEditorState } from 'lexical'
 import { RefObject, memo, useCallback, useEffect, useState } from 'react'
 
 import { useApp } from '../../../contexts/app-context'
+import { usePlugin } from '../../../contexts/plugin-context'
+import { useSettings } from '../../../contexts/settings-context'
 import { LiteSkillEntry } from '../../../core/skills/liteSkills'
 import { SnippetEntry } from '../../../core/snippets/snippetsManager'
 import { Assistant } from '../../../types/assistant.types'
@@ -52,6 +54,7 @@ export type LexicalContentEditableProps = {
   onChange?: (content: SerializedEditorState) => void
   onTextContentChange?: (textContent: string) => void
   onEnter?: (evt: KeyboardEvent) => void
+  enterKeyCreatesNewline?: boolean
   onKeyDown?: (event: React.KeyboardEvent<HTMLDivElement>) => void
   onFocus?: () => void
   onMentionNodeMutation?: (mutations: NodeMutations<MentionNode>) => void
@@ -81,8 +84,10 @@ export type LexicalContentEditableProps = {
   assistants?: Assistant[]
   currentAssistantId?: string
   onSelectAssistant?: (assistantId: string) => void
-  currentChatMode?: import('./ChatModeSelect').ChatMode
-  onSelectChatMode?: (mode: import('./ChatModeSelect').ChatMode) => void
+  currentChatMode?: import('../../../core/agent/chat-mode').ChatMode
+  onSelectChatMode?: (
+    mode: import('../../../core/agent/chat-mode').ChatMode,
+  ) => void
   allowAgentModeOption?: boolean
   models?: ChatModel[]
   selectedModelIds?: string[]
@@ -90,6 +95,7 @@ export type LexicalContentEditableProps = {
   selectedSkillNames?: string[]
   onSelectSkill?: (skill: LiteSkillEntry) => void
   onRunSlashCommand?: (command: SlashCommand) => void
+  nativeSlashCommands?: SlashCommand[]
   snippets?: SnippetEntry[]
   onCreateSnippetsFile?: () => void
   plugins?: {
@@ -162,6 +168,7 @@ function LexicalContentEditable({
   onChange,
   onTextContentChange,
   onEnter,
+  enterKeyCreatesNewline = false,
   onKeyDown,
   onFocus,
   onMentionNodeMutation,
@@ -192,11 +199,14 @@ function LexicalContentEditable({
   selectedSkillNames = [],
   onSelectSkill,
   onRunSlashCommand,
+  nativeSlashCommands,
   snippets = [],
   onCreateSnippetsFile,
   plugins,
 }: LexicalContentEditableProps) {
   const app = useApp()
+  const plugin = usePlugin()
+  const { settings } = useSettings()
   const [activeFilePath, setActiveFilePath] = useState<string | null>(
     app.workspace.getActiveFile()?.path ?? null,
   )
@@ -219,12 +229,19 @@ function LexicalContentEditable({
   }
 
   const defaultSearch = useCallback(
-    (query: string) => fuzzySearch(app, query),
-    [app],
+    (query: string) =>
+      fuzzySearch(
+        app,
+        query,
+        settings,
+        plugin.getModuleFileTextRendererRegistry().listExtensions(),
+      ),
+    [app, settings, plugin],
   )
   const searchFoldersByQuery = useCallback(
-    (query: string): MentionableFolder[] => fuzzySearchFolders(app, query),
-    [app],
+    (query: string): MentionableFolder[] =>
+      fuzzySearchFolders(app, query, settings),
+    [app, settings],
   )
 
   const resolvedSearch = useCallback(
@@ -327,6 +344,7 @@ function LexicalContentEditable({
           placement={mentionMenuPlacement}
           onSelectSkill={onSelectSkill}
           onRunCommand={onRunSlashCommand}
+          nativeCommands={nativeSlashCommands}
           onCreateSnippetsFile={onCreateSnippetsFile}
         />
       )}
@@ -345,6 +363,7 @@ function LexicalContentEditable({
         <OnEnterPlugin
           onEnter={onEnter}
           onVaultChat={plugins?.onEnter?.onVaultChat}
+          enterKeyCreatesNewline={enterKeyCreatesNewline}
         />
       )}
       <OnMutationPlugin
@@ -373,7 +392,9 @@ function LexicalContentEditable({
         </>
       )}
       <PlainTextPastePlugin />
-      <ObsidianFileDropPlugin />
+      <ObsidianFileDropPlugin
+        onDropFiles={attachmentsEnabled ? onPasteFiles : undefined}
+      />
       {/* templates feature removed */}
     </LexicalComposer>
   )

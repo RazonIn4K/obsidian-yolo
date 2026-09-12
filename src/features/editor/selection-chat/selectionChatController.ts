@@ -19,6 +19,7 @@ import {
   SelectionInfo,
   SelectionManager,
 } from '../../../components/selection/SelectionManager'
+import { getChatModelClient } from '../../../core/llm/manager'
 import type YoloPlugin from '../../../main'
 import { YoloSettings } from '../../../settings/schema/setting.types'
 import type {
@@ -29,7 +30,7 @@ import type {
 import { getMentionableBlockData } from '../../../utils/obsidian'
 import type { QuickAskSelectionScope } from '../quick-ask/quickAsk.types'
 import type { QuickAskLaunchMode } from '../quick-ask/quickAsk.types'
-import { QUICK_ASK_CURSOR_MARKER } from '../quick-ask/quickAskController'
+import { QUICK_ASK_CURSOR_MARKER } from '../quick-ask/quickAsk.types'
 import { pdfSelectionHighlightController } from '../selection-highlight/pdfSelectionHighlightController'
 import { selectionHighlightController } from '../selection-highlight/selectionHighlightController'
 
@@ -41,13 +42,6 @@ import type { PdfSelectionResult } from './getPdfSelectionData'
 import { getPdfLeafContentEl } from './getPdfSelectionData'
 import { PdfSelectionManager } from './PdfSelectionManager'
 import { resolveMarkdownTableSelectionFromTableElement } from './tableSelectionResolver'
-
-export type PendingSelectionRewrite = {
-  editor: Editor
-  selectedText: string
-  from: { line: number; ch: number }
-  to: { line: number; ch: number }
-}
 
 type EditorRange = {
   from: number
@@ -81,9 +75,8 @@ type SelectionChatControllerDeps = {
       initialMentionables?: Mentionable[]
       initialMode?: QuickAskLaunchMode
       initialInput?: string
-      editContextText?: string
-      editSelectionFrom?: { line: number; ch: number }
       selectionScope?: QuickAskSelectionScope
+      isRewriteEntry?: boolean
       autoSend?: boolean
       initialAssistantId?: string
     },
@@ -134,7 +127,23 @@ type SelectionChatControllerDeps = {
     text: string,
     assistantId?: string,
   ) => Promise<void>
-  isSmartSpaceOpen: () => boolean
+  /**
+   * PDF multi-quote annotation (docs/plans/2026-08-16-pdf-annotation-quotes.md,
+   * architecture decision A). `selectedBlock` must already carry a
+   * `highlightId`. Returns the annotation number chat assigned, so the PDF
+   * bubble can render "批注N" without ever numbering itself.
+   */
+  addPdfQuoteToChat: (
+    selectedBlock: MentionableBlockData,
+  ) => Promise<number | undefined>
+  /**
+   * The one deps channel the PDF-side bubble editor uses to patch or remove
+   * its mentionable's comment (architecture decision B).
+   */
+  updatePdfQuoteMention: (
+    highlightId: string,
+    patch: { comment: string } | null,
+  ) => void | Promise<void>
 }
 
 export class SelectionChatController {
@@ -151,9 +160,8 @@ export class SelectionChatController {
       initialMentionables?: Mentionable[]
       initialMode?: QuickAskLaunchMode
       initialInput?: string
-      editContextText?: string
-      editSelectionFrom?: { line: number; ch: number }
       selectionScope?: QuickAskSelectionScope
+      isRewriteEntry?: boolean
       autoSend?: boolean
       initialAssistantId?: string
     },
@@ -183,7 +191,8 @@ export class SelectionChatController {
     text: string,
     assistantId?: string,
   ) => Promise<void>
-  private readonly isSmartSpaceOpen: () => boolean
+  private readonly addPdfQuoteToChat: SelectionChatControllerDeps['addPdfQuoteToChat']
+  private readonly updatePdfQuoteMention: SelectionChatControllerDeps['updatePdfQuoteMention']
 
   private selectionManager: SelectionManager | null = null
   private pdfSelectionManager: PdfSelectionManager | null = null
@@ -209,7 +218,6 @@ export class SelectionChatController {
    * highlight id and cause the highlight to disappear on next reconcile.
    */
   private lastSyncedPdfKey: string | null = null
-  private pendingSelectionRewrite: PendingSelectionRewrite | null = null
   private enableSelectionChat = true
   private layoutChangeEventRef: EventRef | null = null
 
@@ -227,21 +235,12 @@ export class SelectionChatController {
     this.openChatWithSelectionAndPrefill = deps.openChatWithSelectionAndPrefill
     this.addSelectionToSidebarChat = deps.addSelectionToSidebarChat
     this.openChatWithSelectionAndSend = deps.openChatWithSelectionAndSend
-    this.isSmartSpaceOpen = deps.isSmartSpaceOpen
+    this.addPdfQuoteToChat = deps.addPdfQuoteToChat
+    this.updatePdfQuoteMention = deps.updatePdfQuoteMention
   }
 
   isActive(): boolean {
     return this.enableSelectionChat
-  }
-
-  clearPendingSelectionRewrite() {
-    this.pendingSelectionRewrite = null
-  }
-
-  consumePendingSelectionRewrite(): PendingSelectionRewrite | null {
-    const pending = this.pendingSelectionRewrite
-    this.pendingSelectionRewrite = null
-    return pending
   }
 
   initialize() {
@@ -656,10 +655,6 @@ export class SelectionChatController {
 
     this.destroyCurrentWidget()
 
-    if (this.isSmartSpaceOpen()) {
-      return
-    }
-
     const enableSelectionChat =
       this.getSettings().continuationOptions?.enableSelectionChat ?? true
     if (!enableSelectionChat) {
@@ -682,6 +677,14 @@ export class SelectionChatController {
         onClose: () => {
           this.destroyCurrentWidget()
         },
+        onLengthDragStart: snapshot.isTableSelection
+          ? undefined
+          : (startClientY, currentClientY) => {
+              return this.adjustSelectionLength(editor, snapshot, {
+                startClientY,
+                currentClientY,
+              })
+            },
         onAction: (
           actionId: string,
           _sel: SelectionInfo,
@@ -1052,6 +1055,9 @@ export class SelectionChatController {
           assistantId,
         )
       },
+      onQuoteAction: () => {
+        void this.handlePdfQuoteAction(pdfData, blockData)
+      },
     })
     this.selectionChatWidget.mount()
   }
@@ -1080,35 +1086,8 @@ export class SelectionChatController {
       return
     }
 
-    // Mirror the markdown chat-input/chat-send paths: register a NEW 'pinned'
-    // highlight (with a fresh id, independent from the transient 'sync' one
-    // currently tracked in chat).  This way subsequent selections that sweep
-    // 'sync' entries on the leaf cannot wipe the pinned highlight.
-    const buildPinnedBlock = (): MentionableBlockData => {
-      if (this.shouldPersistSelectionHighlight()) {
-        const pinnedId = crypto.randomUUID()
-        pdfSelectionHighlightController.addHighlight(
-          pdfData.leaf,
-          pinnedId,
-          {
-            range: pdfData.range,
-            pageNumber: pdfData.pageNumber,
-            file: pdfData.file,
-          },
-          'pinned',
-          'chat',
-        )
-        return {
-          ...blockData,
-          source: 'selection-pinned',
-          highlightId: pinnedId,
-        }
-      }
-      return { ...blockData, source: 'selection-pinned' }
-    }
-
     if (mode === 'chat-input') {
-      const pinned = buildPinnedBlock()
+      const pinned = this.buildPinnedPdfBlock(pdfData, blockData)
       if (actionId === 'add-to-sidebar') {
         await this.addSelectionToSidebarChat(pinned)
         return
@@ -1123,7 +1102,7 @@ export class SelectionChatController {
 
     if (mode === 'chat-send') {
       await this.openChatWithSelectionAndSend(
-        buildPinnedBlock(),
+        this.buildPinnedPdfBlock(pdfData, blockData),
         instruction.trim(),
         resolvedAssistantId,
       )
@@ -1161,6 +1140,212 @@ export class SelectionChatController {
       initialMode: 'ask',
       autoSend: prompt.length > 0,
     })
+  }
+
+  /**
+   * Builds a `selection-pinned` MentionableBlockData for a PDF selection,
+   * registering a NEW 'pinned' highlight (fresh id, independent from the
+   * transient 'sync' one currently tracked in chat) so a later selection
+   * that sweeps 'sync' entries on the leaf cannot wipe it. Shared by the
+   * add-to-sidebar / chat-input / chat-send actions in
+   * `handlePdfSelectionAction` AND the PDF quote button
+   * (`handlePdfQuoteAction`) — the only two producers of PDF pinned blocks.
+   * See docs/plans/2026-08-16-pdf-annotation-quotes.md item 5.
+   *
+   * Anchor and paint are decoupled (see the 2026-08-16 addendum to the plan,
+   * "锚点与涂色必须解耦"): `addHighlight` is called unconditionally so a
+   * `highlightId` is always produced — the quote button's bubble/editor must
+   * work even when `persistSelectionHighlight` is off, since that setting
+   * only promises a *visual* preference, not the annotation feature itself.
+   * `persistSelectionHighlight` only gates whether the entry paints.
+   */
+  private buildPinnedPdfBlock(
+    pdfData: Extract<PdfSelectionResult, { kind: 'data' }>,
+    blockData: MentionableBlockData,
+  ): MentionableBlockData {
+    const pinnedId = crypto.randomUUID()
+    pdfSelectionHighlightController.addHighlight(
+      pdfData.leaf,
+      pinnedId,
+      {
+        range: pdfData.range,
+        pageNumber: pdfData.pageNumber,
+        file: pdfData.file,
+      },
+      'pinned',
+      'chat',
+      { paint: this.shouldPersistSelectionHighlight() },
+    )
+    return {
+      ...blockData,
+      source: 'selection-pinned',
+      highlightId: pinnedId,
+    }
+  }
+
+  /**
+   * Handles a click on the PDF-only "引用" button (docs/plans/2026-08-16-pdf-
+   * annotation-quotes.md item 6). Builds the same pinned highlight + block as
+   * the add-to-sidebar action (via `buildPinnedPdfBlock`), sends it to chat to
+   * get a numbered "批注N" slot — chat is the only side allowed to assign the
+   * number (architecture decision A) — then tells
+   * `pdfSelectionHighlightController` to render the bubble and open its
+   * editor immediately in the "new" draft state, mirroring
+   * `AssistantSelectionQuoteButton.handleCreateQuote`.
+   */
+  private async handlePdfQuoteAction(
+    pdfData: Extract<PdfSelectionResult, { kind: 'data' }>,
+    blockData: MentionableBlockData,
+  ): Promise<void> {
+    const pinnedBlock = this.buildPinnedPdfBlock(pdfData, blockData)
+    const annotationNumber = await this.addPdfQuoteToChat(pinnedBlock)
+    if (annotationNumber === undefined) {
+      return
+    }
+    if (!pinnedBlock.highlightId) {
+      // Unreachable in practice: `buildPinnedPdfBlock` always sets
+      // `highlightId` now that anchor and paint are decoupled — its own doc
+      // comment covers why. `MentionableBlockData.highlightId` is merely
+      // typed optional (it's also used by non-PDF, non-annotation callers),
+      // so this stays as a narrowing guard rather than a settings-off degrade.
+      return
+    }
+
+    pdfSelectionHighlightController.enableAnnotation(
+      pinnedBlock.highlightId,
+      { annotationNumber, comment: '', isNew: true },
+      {
+        onCommentChange: (highlightId, comment) => {
+          void this.updatePdfQuoteMention(highlightId, { comment })
+        },
+        onDelete: (highlightId) => {
+          void this.updatePdfQuoteMention(highlightId, null)
+        },
+        getLabels: () => ({
+          commentPlaceholder: this.t(
+            'chat.assistantQuote.commentPlaceholder',
+            '添加批注…',
+          ),
+          saveLabel: this.t('chat.assistantQuote.save', '保存批注'),
+          deleteLabel: this.t('chat.assistantQuote.delete', '删除批注'),
+        }),
+      },
+    )
+  }
+
+  private adjustSelectionLength(
+    editor: Editor,
+    snapshot?: MarkdownSelectionSnapshot,
+    initialDrag?: { startClientY: number; currentClientY: number },
+  ): boolean {
+    const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView)
+    if (!markdownView) {
+      new Notice(this.t('selection.length.noEditor', '无法获取当前编辑器'))
+      return false
+    }
+    const resolvedSnapshot = this.resolveMarkdownSelectionSnapshot(
+      editor,
+      markdownView,
+      snapshot,
+    )
+    if (!resolvedSnapshot?.editContextText.trim()) {
+      new Notice(
+        this.t('selection.length.noSelection', '请先选择要调整的文本。'),
+      )
+      return false
+    }
+    if (resolvedSnapshot.isTableSelection) {
+      new Notice(
+        this.t(
+          'selection.length.tableUnsupported',
+          '暂不支持调整表格选区的篇幅。',
+        ),
+      )
+      return false
+    }
+    const editorView = this.getEditorView(editor)
+    if (!editorView) {
+      new Notice(this.t('selection.length.noEditorView', '无法获取编辑器视图'))
+      return false
+    }
+
+    const from =
+      resolvedSnapshot.highlightRange?.from ??
+      editor.posToOffset(resolvedSnapshot.selectionFrom)
+    const to =
+      resolvedSnapshot.highlightRange?.to ??
+      from + resolvedSnapshot.editContextText.length
+    const selectedText = resolvedSnapshot.editContextText.trimEnd()
+    const effectiveTo = Math.max(
+      from,
+      to - (resolvedSnapshot.editContextText.length - selectedText.length),
+    )
+    const settings = this.getSettings()
+    const preferredModelId = [
+      settings.continuationOptions?.tabCompletionModelId,
+      settings.continuationOptions?.continuationModelId,
+      settings.chatModelId,
+    ].find(
+      (modelId): modelId is string =>
+        Boolean(modelId) &&
+        settings.chatModels.some((model) => model.id === modelId),
+    )
+    const fallbackModelId =
+      preferredModelId || settings.chatModels.at(0)?.id || ''
+    if (!fallbackModelId) {
+      new Notice(
+        this.t(
+          'quickAsk.noModelConfigured',
+          'No chat model configured. Please add a model in settings.',
+        ),
+      )
+      return false
+    }
+
+    let modelClient: ReturnType<typeof getChatModelClient>
+    try {
+      modelClient = getChatModelClient({
+        settings,
+        modelId: fallbackModelId,
+      })
+    } catch (error) {
+      console.error('[YOLO] Failed to resolve length adjustment model:', error)
+      new Notice(
+        this.t(
+          'quickAsk.noModelConfigured',
+          'No chat model configured. Please add a model in settings.',
+        ),
+      )
+      return false
+    }
+
+    const beforeChars = Math.max(
+      0,
+      settings.continuationOptions?.quickAskContextBeforeChars ?? 5000,
+    )
+    const afterChars = Math.max(
+      0,
+      settings.continuationOptions?.quickAskContextAfterChars ?? 2000,
+    )
+    const doc = editorView.state.doc
+    const file = resolvedSnapshot.editBlockData.file
+    this.plugin.startSelectionLengthAdjustment({
+      view: editorView,
+      from,
+      to: effectiveTo,
+      selectedText,
+      contextBefore: doc.sliceString(Math.max(0, from - beforeChars), from),
+      contextAfter: doc.sliceString(
+        effectiveTo,
+        Math.min(doc.length, effectiveTo + afterChars),
+      ),
+      fileTitle: file.basename,
+      providerClient: modelClient.providerClient,
+      model: modelClient.model,
+      settings,
+      initialDrag,
+    })
+    return true
   }
 
   private async rewriteSelection(
@@ -1204,13 +1389,12 @@ export class SelectionChatController {
     }
 
     this.showQuickAskWithOptions(editor, editorView, {
-      initialMode: 'edit',
+      initialMode: 'ask',
       initialPrompt: behavior === 'preset' ? prompt : undefined,
       initialInput: behavior === 'custom' ? prompt : undefined,
       initialMentionables: [mentionable],
-      editContextText: resolvedSnapshot.editContextText,
-      editSelectionFrom: resolvedSnapshot.selectionFrom,
       selectionScope: this.createSelectionScope(mentionable, resolvedSnapshot),
+      isRewriteEntry: true,
       autoSend: behavior === 'preset',
       initialAssistantId: assistantId,
     })

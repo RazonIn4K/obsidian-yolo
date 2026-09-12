@@ -121,38 +121,11 @@ npm run dev
 
 ## 改数据库 schema
 
-YOLO 用的是 PGlite + Drizzle ORM。如果你的改动涉及 schema：
-
-1. 编辑 `src/database/schema.ts`。
-2. 生成迁移：`npx drizzle-kit generate --name <migration-name>`
-3. 检查 `drizzle/` 下生成的文件。
-4. 编译进 bundle：`npm run migrate:compile` —— 这一步会更新 `src/database/migrations.json`，这才是启动时实际跑的迁移。**`drizzle/` 里的文件不编译进来就不会生效。**
-
-每个逻辑改动尽量保持单个迁移文件。如果中间反复迭代生成了多个，提交前合并一下：
-
-1. 删掉 `drizzle/` 里新增的迁移文件。
-2. 删掉 `drizzle/meta/` 下新增的 snapshot 文件。
-3. 把 `drizzle/meta/_journal.json` 里新增的条目去掉。
-4. 重新跑 `npx drizzle-kit generate --name <最终名字>`，生成一个合并后的迁移文件。
-5. 再跑一次 `npm run migrate:compile`。
+RAG 向量库现在是 IndexedDB 后端（`src/database/vector-store/`）。schema v1 已经定型 —— 改 schema 需要提升 `VECTOR_DATABASE_VERSION`，并在 `vectorDatabase.ts` 里加一条升级路径。
 
 ### 在 Obsidian 里调试数据库
 
-在 Obsidian 开发者控制台里：
-
-1. 找到日志 `Next composer database initialized.`
-2. 右键日志中的 `DatabaseManager` 对象 → **Store as global variable**（会被存成 `temp1` 之类）。
-3. 直接跑查询：
-   ```js
-   await temp1.pgClient.query(`
-     SELECT table_schema, table_name
-     FROM information_schema.tables
-     WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
-       AND table_type = 'BASE TABLE'
-     ORDER BY table_schema, table_name;
-   `)
-   ```
-4. 改完别忘了 `await temp1.save()` 把变更落盘。
+在 Obsidian 开发者控制台里，直接用标准 IndexedDB API（`indexedDB.databases()`、`indexedDB.open(name)`）检查向量库，或者用浏览器 DevTools 的 **Application → IndexedDB** 面板。数据库名按 vault 命名空间隔离，格式是 `yolo-vector:<vaultNamespaceId>`。
 
 ---
 
@@ -175,6 +148,8 @@ YOLO 用的是 PGlite + Drizzle ORM。如果你的改动涉及 schema：
 
 - Owner 用业余时间 review，第一次回复一般在一天到两周之间，大改动会更久。
 - 你可以在评论里 @Lapis0x1 来召唤审查 bot，它可以被视为 Lapis0x0 的回复。
+- Bot 可能留下普通建议，也可能提交具有阻塞意义的 **Changes requested**。请自行判断每条反馈：合理的问题应当修复，不适用的建议则说明理由。
+- 处理完反馈后，可以通过 GitHub 的 **Re-request review** 操作请求复审，也可以再次在评论里 @Lapis0x1。这不是强制步骤，但当你希望确认修改后的 PR 已没有剩余阻塞问题时会很有用；仅仅 push 新提交不会自动请求复审。
 
 ---
 

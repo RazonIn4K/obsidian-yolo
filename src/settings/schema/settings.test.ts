@@ -1,4 +1,5 @@
 import { DEFAULT_LOCAL_MCP_SERVER_PORT } from '../../core/mcp/localMcpServerConfig'
+import { LOCAL_EMBEDDING_PROVIDER_ID } from '../../core/rag/local-embedding/constants'
 
 import { SETTINGS_SCHEMA_VERSION } from './migrations'
 import {
@@ -26,12 +27,9 @@ describe('parseYoloSettings', () => {
     expect(result.systemPrompt).toBe('')
     expect(result.softDismissedUpdateVersion).toBe('')
     expect(result.mutedUpdateVersion).toBe('')
+    expect(result.mutedModuleUpdateVersions).toEqual({})
+    expect(result.pluginUpdateNoticeEnabled).toBe(true)
     expect(result.pluginUpdateAutoDownloadEnabled).toBe(true)
-    expect(result.learningOptions).toEqual({
-      modelId: '',
-      betaNoticeAcknowledged: false,
-    })
-
     expect(result.ragOptions).toMatchObject({
       enabled: true,
       chunkSize: 1000,
@@ -45,7 +43,7 @@ describe('parseYoloSettings', () => {
     })
 
     expect(result.mcp.servers).toEqual([])
-    expect(result.mcp.enableToolDisclosure).toBe(false)
+    expect(result.mcp.discoveredCatalogs).toEqual({})
     expect(result.yolo).toEqual({ baseDir: 'YOLO' })
 
     expect(result.chatOptions).toMatchObject({
@@ -58,6 +56,8 @@ describe('parseYoloSettings', () => {
       reasoningLevelByModelId: {},
       chatExportIncludeThinking: false,
       chatExportIncludeToolCalls: false,
+      lastChatSurface: 'chat',
+      lastCliRuntimeId: 'claude-code',
     })
 
     expect(result.notificationOptions).toMatchObject({
@@ -81,7 +81,7 @@ describe('parseYoloSettings', () => {
     expect(result.continuationOptions.tabCompletionTriggers).toEqual(
       expect.arrayContaining(DEFAULT_TAB_COMPLETION_TRIGGERS),
     )
-    expect(result.continuationOptions.smartSpaceQuickActions).toBeUndefined()
+    expect(result.continuationOptions.continuationQuickActions).toBeUndefined()
 
     expect(result.assistants).toEqual([])
   })
@@ -92,16 +92,74 @@ describe('parseYoloSettings', () => {
       mcp: {
         servers: [],
         builtinToolOptions: {},
-        enableToolDisclosure: false,
       },
     })
 
-    expect(result.version).toBe(75)
+    expect(result.version).toBe(SETTINGS_SCHEMA_VERSION)
     expect(result.mcp.localServer).toEqual({
       enabled: false,
       port: DEFAULT_LOCAL_MCP_SERVER_PORT,
       token: '',
     })
+  })
+
+  it('defaults existing tab completion triggers to insert mode', () => {
+    const result = parseYoloSettings({
+      version: SETTINGS_SCHEMA_VERSION,
+      continuationOptions: {
+        tabCompletionTriggers: [
+          {
+            id: 'legacy-trigger',
+            type: 'regex',
+            pattern: '\\$[^$\\n]*$',
+            enabled: true,
+          },
+        ],
+      },
+    })
+
+    expect(result.continuationOptions.tabCompletionTriggers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'legacy-trigger',
+          type: 'regex',
+          pattern: '\\$[^$\\n]*$',
+          enabled: true,
+          acceptMode: 'insert',
+        }),
+      ]),
+    )
+  })
+
+  it('persists the last Chat surface and CLI provider independently', () => {
+    const result = parseYoloSettings({
+      version: SETTINGS_SCHEMA_VERSION,
+      chatOptions: {
+        includeCurrentFileContent: true,
+        lastChatSurface: 'chat',
+        lastCliRuntimeId: 'grok',
+        cliModelIdByRuntime: { grok: 'grok-4.6' },
+        cliChatModeByRuntime: { grok: 'agent' },
+        cliAgentYoloEnabledByRuntime: { grok: false },
+      },
+    })
+
+    expect(result.chatOptions).toMatchObject({
+      lastChatSurface: 'chat',
+      lastCliRuntimeId: 'grok',
+      cliModelIdByRuntime: { grok: 'grok-4.6' },
+      cliChatModeByRuntime: { grok: 'agent' },
+      cliAgentYoloEnabledByRuntime: { grok: false },
+    })
+  })
+
+  it('preserves a legacy hidden YOLO root for the startup filesystem migration', () => {
+    expect(
+      parseYoloSettings({
+        version: SETTINGS_SCHEMA_VERSION,
+        yolo: { baseDir: '.yolo' },
+      }).yolo.baseDir,
+    ).toBe('.yolo')
   })
 
   it('migrates applyModelId to chatTitleModelId for legacy settings', () => {
@@ -170,9 +228,8 @@ describe('parseYoloSettings', () => {
       chatModelId: 'openai/gpt-5',
       mcp: {
         servers: [],
-        enableToolDisclosure: false,
-        builtinToolOptions: {
-          delegate_subagent: {
+        builtinCapabilityOptions: {
+          subagent_delegation: {
             allowedModelIds: [
               'openai/gpt-4.1-mini',
               'openai/disabled',
@@ -185,10 +242,10 @@ describe('parseYoloSettings', () => {
     })
 
     expect(
-      result.mcp.builtinToolOptions.delegate_subagent?.allowedModelIds,
+      result.mcp.builtinCapabilityOptions.subagent_delegation?.allowedModelIds,
     ).toEqual(['openai/gpt-4.1-mini', 'openai/disabled'])
     expect(
-      result.mcp.builtinToolOptions.delegate_subagent?.preferredModelId,
+      result.mcp.builtinCapabilityOptions.subagent_delegation?.preferredModelId,
     ).toBe('openai/gpt-4.1-mini')
   })
 
@@ -220,16 +277,15 @@ describe('parseYoloSettings', () => {
       chatModelId: 'openai/gpt-5',
       mcp: {
         servers: [],
-        enableToolDisclosure: false,
-        builtinToolOptions: {},
+        builtinCapabilityOptions: {},
       },
     })
 
     expect(
-      result.mcp.builtinToolOptions.delegate_subagent?.allowedModelIds,
+      result.mcp.builtinCapabilityOptions.subagent_delegation?.allowedModelIds,
     ).toEqual(['openai/gpt-5'])
     expect(
-      result.mcp.builtinToolOptions.delegate_subagent?.preferredModelId,
+      result.mcp.builtinCapabilityOptions.subagent_delegation?.preferredModelId,
     ).toBe('openai/gpt-5')
   })
 
@@ -471,7 +527,7 @@ describe('parseYoloSettings', () => {
     expect(result.embeddingModelId).toBe('')
     expect(result.continuationOptions.continuationModelId).toBe('openai/gpt-5')
     expect(result.continuationOptions.tabCompletionModelId).toBe('openai/gpt-5')
-    expect(result.learningOptions.modelId).toBe('openai/gpt-5')
+    expect(result.learningOptions).toEqual({ modelId: 'missing/model' })
     expect(result.assistants).toEqual([
       {
         id: 'assistant-1',
@@ -484,8 +540,13 @@ describe('parseYoloSettings', () => {
     expect(result.quickAskAssistantId).toBeUndefined()
   })
 
-  it('copies the default chat model when the learning model is missing or disabled', () => {
-    const base = {
+  it('keeps yolo-local embedding models even though no matching provider record exists', () => {
+    // `yolo-local` (docs/plans/08-22-local-embedding/00-plan.md §3.5) is a
+    // reserved providerId for on-device embedding models — it deliberately
+    // never has a `settings.providers` entry. Regression test for a bug
+    // where `normalizeYoloSettingsReferences` treated that as "orphaned" and
+    // silently deleted the model on every settings save.
+    const result = parseYoloSettings({
       version: SETTINGS_SCHEMA_VERSION,
       providers: [
         {
@@ -494,43 +555,42 @@ describe('parseYoloSettings', () => {
           apiKey: 'token',
         },
       ],
-      chatModels: [
+      embeddingModels: [
         {
-          providerId: 'openai',
-          id: 'openai/gpt-5',
-          model: 'gpt-5',
-          enable: true,
-        },
-        {
-          providerId: 'openai',
-          id: 'openai/disabled',
-          model: 'disabled',
-          enable: false,
+          providerId: LOCAL_EMBEDDING_PROVIDER_ID,
+          id: 'local/bge-small-en-v1.5',
+          model: 'bge-small-en-v1.5',
+          name: 'BGE Small (English)',
+          dimension: 384,
         },
       ],
-      chatModelId: 'openai/gpt-5',
-    }
+      embeddingModelId: 'local/bge-small-en-v1.5',
+    })
 
-    expect(parseYoloSettings(base).learningOptions.modelId).toBe('openai/gpt-5')
-    expect(
-      parseYoloSettings({
-        ...base,
-        learningOptions: { modelId: 'openai/disabled' },
-      }).learningOptions.modelId,
-    ).toBe('openai/gpt-5')
+    expect(result.embeddingModels).toEqual([
+      {
+        providerId: LOCAL_EMBEDDING_PROVIDER_ID,
+        id: 'local/bge-small-en-v1.5',
+        model: 'bge-small-en-v1.5',
+        name: 'BGE Small (English)',
+        dimension: 384,
+      },
+    ])
+    expect(result.embeddingModelId).toBe('local/bge-small-en-v1.5')
   })
 
-  it('initializes and preserves the learning beta notice acknowledgement', () => {
-    expect(
-      parseYoloSettings({ learningOptions: { modelId: '' } }).learningOptions
-        .betaNoticeAcknowledged,
-    ).toBe(false)
+  it('preserves legacy learning settings as an opaque handoff payload', () => {
+    const learningOptions = {
+      modelId: 'openai/disabled',
+      betaNoticeAcknowledged: true,
+      futureField: { enabled: true },
+    }
     expect(
       parseYoloSettings({
         version: SETTINGS_SCHEMA_VERSION,
-        learningOptions: { modelId: '', betaNoticeAcknowledged: true },
-      }).learningOptions.betaNoticeAcknowledged,
-    ).toBe(true)
+        learningOptions,
+      }).learningOptions,
+    ).toEqual(learningOptions)
   })
 
   it('clears invalid model references when no valid models remain after parsing', () => {
@@ -576,7 +636,7 @@ describe('parseYoloSettings', () => {
     expect(result.embeddingModelId).toBe('')
     expect(result.continuationOptions.continuationModelId).toBe('')
     expect(result.continuationOptions.tabCompletionModelId).toBe('')
-    expect(result.learningOptions.modelId).toBe('')
+    expect(result.learningOptions).toEqual({ modelId: 'broken/model' })
   })
 
   it('deduplicates embedding models with the same provider and model', () => {
@@ -618,5 +678,63 @@ describe('parseYoloSettings', () => {
       },
     ])
     expect(result.embeddingModelId).toBe('openai/text-embedding-3-large')
+  })
+
+  it('defaults knowledgeBases to an empty array for empty input, including after the 81->82 migration', () => {
+    const empty = parseYoloSettings({})
+    expect(empty.knowledgeBases).toEqual([])
+
+    // A pre-multi-kb settings blob (version 81, no `knowledgeBases` key) runs
+    // through migrateFrom81To82, which deliberately does not synthesize one
+    // (see 81_to_82.test.ts) — the field is filled in by the schema default.
+    const migrated = parseYoloSettings({ version: 81 })
+    expect(migrated.knowledgeBases).toEqual([])
+  })
+
+  it('trims knowledge base names and drops an entry missing a required id while keeping valid siblings', () => {
+    const result = parseYoloSettings({
+      version: SETTINGS_SCHEMA_VERSION,
+      knowledgeBases: [
+        {
+          id: 'kb-a',
+          name: '  Notes  ',
+          description: '',
+          include: [],
+          exclude: [],
+        },
+        { id: 'kb-b', name: 'Second' }, // missing `description`/`include`/`exclude` — survive via `.catch()`
+        { name: 'no id at all' }, // missing required `id` — dropped by resilientArraySchema
+      ],
+    })
+
+    expect(result.knowledgeBases).toEqual([
+      { id: 'kb-a', name: 'Notes', description: '', include: [], exclude: [] },
+      { id: 'kb-b', name: 'Second', description: '', include: [], exclude: [] },
+    ])
+  })
+
+  it('falls back to full settings defaults when two knowledge bases share an id or name', () => {
+    const byId = parseYoloSettings({
+      version: SETTINGS_SCHEMA_VERSION,
+      chatModelId: 'should-be-discarded',
+      knowledgeBases: [
+        { id: 'dup', name: 'A', description: '', include: [], exclude: [] },
+        { id: 'dup', name: 'B', description: '', include: [], exclude: [] },
+      ],
+    })
+    // A duplicate fails the whole field, which fails the whole settings
+    // parse (see knowledgeBasesFieldSchema's doc comment) — parseYoloSettings
+    // then falls back to full defaults, same as any other unparseable field.
+    expect(byId.knowledgeBases).toEqual([])
+    expect(byId.chatModelId).toBe('')
+
+    const byName = parseYoloSettings({
+      version: SETTINGS_SCHEMA_VERSION,
+      knowledgeBases: [
+        { id: 'a', name: 'Same', description: '', include: [], exclude: [] },
+        { id: 'b', name: 'same', description: '', include: [], exclude: [] }, // case-insensitive collision
+      ],
+    })
+    expect(byName.knowledgeBases).toEqual([])
   })
 })

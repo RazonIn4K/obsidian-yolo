@@ -18,7 +18,6 @@ import type { BaseLLMProvider } from '../llm/base'
 
 import {
   type LoadedDeferredToolSchema,
-  extractLoadedDeferredToolNames,
   extractLoadedDeferredToolSchemas,
 } from './tool-disclosure'
 
@@ -98,6 +97,7 @@ export type LatestAssistantContextUsage = {
   promptTokens: number
   maxContextTokens: number | null
   ratio: number | null
+  cacheHitRate?: number
 }
 
 export type AutoContextCompactionPromptTrigger = LatestAssistantContextUsage
@@ -115,7 +115,8 @@ export const getLatestAssistantContextUsage = ({
       continue
     }
 
-    const promptTokens = message.metadata?.usage?.prompt_tokens
+    const usage = message.metadata?.usage
+    const promptTokens = usage?.prompt_tokens
     if (typeof promptTokens !== 'number' || !Number.isFinite(promptTokens)) {
       continue
     }
@@ -126,6 +127,14 @@ export const getLatestAssistantContextUsage = ({
       Number.isFinite(maxContextTokens)
         ? maxContextTokens
         : null
+    const cacheReadTokens = usage?.cache_read_input_tokens
+    const cacheHitRate =
+      typeof cacheReadTokens === 'number' &&
+      Number.isFinite(cacheReadTokens) &&
+      cacheReadTokens >= 0 &&
+      promptTokens > 0
+        ? Math.min(1, cacheReadTokens / promptTokens)
+        : null
 
     return {
       assistantMessage: message,
@@ -135,6 +144,7 @@ export const getLatestAssistantContextUsage = ({
         resolvedMaxContextTokens === null
           ? null
           : promptTokens / resolvedMaxContextTokens,
+      ...(cacheHitRate !== null ? { cacheHitRate } : {}),
     }
   }
 
@@ -438,9 +448,6 @@ export const buildCompactedConversationState = async ({
     return null
   }
 
-  const loadedDeferredToolNames = [
-    ...extractLoadedDeferredToolNames({ messages }),
-  ].sort()
   const loadedDeferredToolSchemas =
     await filterPersistableLoadedDeferredToolSchemas(
       extractLoadedDeferredToolSchemas({ messages }),
@@ -453,7 +460,6 @@ export const buildCompactedConversationState = async ({
     compactedAt: Date.now(),
     summaryModelId,
     compactedMessageCount: trigger.retainedStartIndex,
-    ...(loadedDeferredToolNames.length > 0 ? { loadedDeferredToolNames } : {}),
     ...(loadedDeferredToolSchemas.length > 0
       ? { loadedDeferredToolSchemas }
       : {}),
@@ -474,9 +480,6 @@ export const buildManualCompactionState = async ({
     return null
   }
 
-  const loadedDeferredToolNames = [
-    ...extractLoadedDeferredToolNames({ messages }),
-  ].sort()
   const loadedDeferredToolSchemas =
     await filterPersistableLoadedDeferredToolSchemas(
       extractLoadedDeferredToolSchemas({ messages }),
@@ -488,7 +491,6 @@ export const buildManualCompactionState = async ({
     compactedAt: Date.now(),
     summaryModelId,
     compactedMessageCount: messages.length,
-    ...(loadedDeferredToolNames.length > 0 ? { loadedDeferredToolNames } : {}),
     ...(loadedDeferredToolSchemas.length > 0
       ? { loadedDeferredToolSchemas }
       : {}),

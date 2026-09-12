@@ -1,41 +1,39 @@
-## 1.6.0.3 External Agent Access & Chat Reliability ✨
+## 1.6.9.1 Max Mode Polish ✨
 
-### 🤖 External Agent Integration
+### Agent & tools
 
-- YOLO now provides a local MCP server for external Agents, exposing Vault search and delegation to YOLO Agent tasks (#268).
+- Filled in vector retrieval for vault search in Max, and unified the search tools across the Ask/Agent/Max chat modes.
+- Fixed edits being lost when Max mode ran parallel edit_file calls on the same file. (#594)
+- Optimized the architecture design, unifying the programmatic entry point for calling the Agent.
 
-### 💬 Chat & Quick Ask
+### Prompts
 
-- Interrupted model responses can now be resumed from the existing content by clicking “Continue generating” in the error message, without regenerating the entire response (#450).
-- Reworked auto-follow in Chat and Quick Ask. Scrolling upward during a streaming response no longer pulls the view back to the bottom or causes scrollbar jitter; auto-follow pauses when you leave the bottom and resumes when you return.
-- Math formulas now render live while responses are streaming. The `$` and `$$` output formats have also been unified for more stable display of complex formulas.
-- Improved Quick Ask focus behavior: arrow keys work normally after returning to the editor, and typing `@` again returns to the existing panel without resetting the current draft or conversation.
-- Fixed Skills selected from quick access being inserted in reverse order. They now follow the click order and are inserted at the current cursor position.
-- Refined the conversation history dialog with separate “My Chats” and “Task Conversations” categories, along with smoother interaction behavior.
+- Global/Agent system prompts now support the ![[note]] syntax to embed constraints from other documents.
+- Improved the prompt design for the model proactively suggesting a switch between Ask/Agent/Max capabilities.
 
-### 🎓 Learning & Interface
+### Chat & interface
 
-- Fixed Learning view tabs and related entry points still appearing in Chinese when Obsidian is set to English.
-- Fixed the model selector being clipped when the window does not have enough available space.
+- Right-click the YOLO ribbon icon to choose whether to open Chat in the sidebar, a tab, a split, or a separate window.
+- Added Max mode to the mode list in the @ menu.
+- Improved the styling and animation design of collapsed tool groups.
 
 ---
 
-## 1.6.0.3 外部 Agent 接入与对话可靠性 ✨
+## 1.6.9.1 Max 模式打磨 ✨
 
-### 🤖 外部 Agent 接入
+### Agent 与工具
 
-- YOLO 新增供外部 Agent 接入的本地 MCP 服务，可对外提供 Vault 搜索和 YOLO Agent 任务委派能力 (#268)。
+- 补全 Max 的 vault search 向量检索的能力，并统一 Ask/Agent/Max 三种对话模式的检索工具。
+- 修复 Max 模式并行 edit_file 同一文件丢失编辑的问题。（#594）
+- 优化架构设计，统一 Agent 程序化调用入口。
 
-### 💬 Chat 与 Quick Ask
+### 提示词
 
-- 模型回复中途断开时，现在可以点击错误提示中的“继续生成”，从已有内容处接着回答，无需重新生成整段回复 (#450)。
-- 重构 Chat 与 Quick Ask 的自动跟随机制。模型流式回复时向上滚动不再被拉回底部，也不会出现滚动条抖动；离开底部后会暂停自动跟随，返回底部后自动恢复。
-- 数学公式现在会在回复生成过程中实时渲染，并统一 `$` 与 `$$` 输出格式，使复杂公式的流式显示更加稳定。
-- 优化 Quick Ask 焦点交互：返回编辑器后可正常使用方向键，再次输入 `@` 会回到现有面板，不再重置当前草稿或对话。
-- 修复快捷入口 Skill 插入顺序颠倒的问题，现在会按照点击顺序插入到输入框当前光标位置。
-- 优化历史记录弹窗，新增“我的对话”和“任务会话”分类，并改进整体交互逻辑。
+- 系统全局/Agent提示词支持 ![[笔记]] 语法来嵌入其他文档的约束。
+- 优化模型主动建议 Ask/Agent/Max 能力切换的提示词设计。
 
-### 🎓 学习与界面体验
+### 对话与界面
 
-- 修复英文环境下学习模式标签页及相关入口仍显示中文的问题。
-- 修复模型选择下拉框在窗口空间不足时显示不全的问题。
+- 右键侧边栏 YOLO 图标可选择在侧边栏、标签页、分屏或独立窗口打开 Chat。
+- 为 @ 菜单的模式列表补齐 Max 模式。
+- 优化工具折叠组的样式与动画设计。

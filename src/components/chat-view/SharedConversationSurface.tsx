@@ -8,13 +8,15 @@ import {
   type ChatTimelineRenderVersion,
   type UserMessageViewportState,
 } from './ChatTimelineList'
+import type { ScrollController } from './scroll/scrollController'
 
 type SharedConversationSurfaceProps<TItem extends ChatTimelineItem> = {
   items: TItem[]
   conversationId?: string
   scrollContainerRef: RefObject<HTMLElement>
   onScrollContainerChange?: (element: HTMLElement | null) => void
-  onContentElementChange?: (element: HTMLElement | null) => void
+  onBottomSentinelChange?: (element: HTMLElement | null) => void
+  scrollController?: ScrollController
   renderItem: (
     item: TItem,
     index: number,
@@ -37,6 +39,8 @@ type SharedConversationSurfaceProps<TItem extends ChatTimelineItem> = {
   hasNewerMessages?: boolean
   onLoadEarlier?: () => void
   onLoadNewer?: () => void
+  onGrowWindowToFillViewport?: () => void
+  historyWindowKey?: string
   scrollContainerClassName?: string
   scrollContainerStyle?: CSSProperties
   containerClassName?: string
@@ -52,7 +56,8 @@ export function SharedConversationSurface<TItem extends ChatTimelineItem>({
   conversationId,
   scrollContainerRef,
   onScrollContainerChange,
-  onContentElementChange,
+  onBottomSentinelChange,
+  scrollController,
   renderItem,
   renderVersion,
   virtualizationThreshold,
@@ -67,6 +72,8 @@ export function SharedConversationSurface<TItem extends ChatTimelineItem>({
   hasNewerMessages,
   onLoadEarlier,
   onLoadNewer,
+  onGrowWindowToFillViewport,
+  historyWindowKey,
   scrollContainerClassName,
   scrollContainerStyle,
   containerClassName,
@@ -82,7 +89,8 @@ export function SharedConversationSurface<TItem extends ChatTimelineItem>({
       conversationId={conversationId}
       scrollContainerRef={scrollContainerRef}
       onScrollContainerChange={onScrollContainerChange}
-      onContentElementChange={onContentElementChange}
+      onBottomSentinelChange={onBottomSentinelChange}
+      scrollController={scrollController}
       renderItem={renderItem}
       renderVersion={renderVersion}
       virtualizationThreshold={virtualizationThreshold}
@@ -97,6 +105,8 @@ export function SharedConversationSurface<TItem extends ChatTimelineItem>({
       hasNewerMessages={hasNewerMessages}
       onLoadEarlier={onLoadEarlier}
       onLoadNewer={onLoadNewer}
+      onGrowWindowToFillViewport={onGrowWindowToFillViewport}
+      historyWindowKey={historyWindowKey}
       scrollContainerClassName={scrollContainerClassName}
       scrollContainerStyle={scrollContainerStyle}
       bottomSpacerHeight={bottomSpacerHeight}

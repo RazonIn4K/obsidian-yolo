@@ -1,39 +1,41 @@
 import type { YoloSettings } from '../../settings/schema/setting.types'
-import type { AssistantToolPreference } from '../../types/assistant.types'
+import type {
+  AssistantToolPreference,
+  AssistantToolServerPreference,
+} from '../../types/assistant.types'
+import type { ChatModel } from '../../types/chat-model.types'
 import type { RequestTool } from '../../types/llm/request'
 import type { McpTool } from '../../types/mcp.types'
 import type { LLMProviderApiType } from '../../types/provider.types'
-import { estimateJsonTokens } from '../../utils/llm/contextTokenEstimate'
+import { hasHostedWebSearch } from '../../utils/llm/model-tools'
 import { type JsSandboxSettings } from '../mcp/jsSandboxSettings'
 import { JS_SANDBOX_TOOL_NAME, getJsSandboxTool } from '../mcp/jsSandboxTool'
 import {
   LOAD_TOOL_SCHEMAS_LOCAL_TOOL_NAME,
-  LOCAL_FS_EDIT_TOOL_NAMES,
-  LOCAL_FS_PATH_OPERATION_TOOL_NAMES,
-  LOCAL_MEMORY_SPLIT_ACTION_TOOL_NAMES,
   getLoadToolSchemasTool,
   getLocalFileToolServerName,
+  toModelToolName,
 } from '../mcp/localFileTools'
 import { McpManager } from '../mcp/mcpManager'
-import { parseToolName } from '../mcp/tool-name-utils'
+import { getToolName, parseToolName } from '../mcp/tool-name-utils'
+import {
+  INVOKE_TOOL_NAME,
+  getInvokeTool,
+} from '../tools/internal/invoke_tool/definition'
+import { buildVaultSearchInputSchema } from '../tools/vault_search/definition'
+import { WEB_SEARCH_TOOL_NAME } from '../web-search'
 
-import { FILE_EDIT_GROUP_TOOL_NAME } from './builtinToolUiMeta'
 import {
   formatSubagentModelOption,
   resolveSubagentModelConfig,
 } from './subagent/model-config'
 import {
-  buildServerToolTokenBudgets,
-  getAssistantToolDisclosureMode,
-} from './tool-preferences'
-import { buildToolStub } from './tool-stub'
-
-const LOCAL_MEMORY_TOOL_NAMES = new Set([
-  'memory_ops',
-  'memory_add',
-  'memory_update',
-  'memory_delete',
-])
+  type DeferredToolCatalog,
+  buildDeferredToolCatalog,
+  describeInProcessToolSets,
+  describeMcpToolSets,
+} from './tool-catalog'
+import { getAssistantToolDisclosureMode } from './tool-preferences'
 
 export const isLoadToolSchemasToolName = (toolName: string): boolean => {
   try {
@@ -44,67 +46,6 @@ export const isLoadToolSchemasToolName = (toolName: string): boolean => {
     )
   } catch {
     return toolName === LOAD_TOOL_SCHEMAS_LOCAL_TOOL_NAME
-  }
-}
-
-export const expandAllowedToolNames = (
-  toolNames?: string[],
-): Set<string> | undefined => {
-  if (!toolNames) {
-    return undefined
-  }
-
-  const expanded = new Set<string>(toolNames)
-  const localServer = getLocalFileToolServerName()
-  const localFileEditTool = `${localServer}${McpManager.TOOL_NAME_DELIMITER}${FILE_EDIT_GROUP_TOOL_NAME}`
-  const localFileOpsTool = `${localServer}${McpManager.TOOL_NAME_DELIMITER}fs_file_ops`
-  const localMemoryOpsTool = `${localServer}${McpManager.TOOL_NAME_DELIMITER}memory_ops`
-  const hasFileEditGroup =
-    expanded.has(localFileEditTool) || expanded.has(FILE_EDIT_GROUP_TOOL_NAME)
-  const hasFileOpsGroup =
-    expanded.has(localFileOpsTool) || expanded.has('fs_file_ops')
-  const hasMemoryOpsGroup =
-    expanded.has(localMemoryOpsTool) || expanded.has('memory_ops')
-
-  if (hasFileEditGroup) {
-    for (const splitToolName of LOCAL_FS_EDIT_TOOL_NAMES) {
-      expanded.add(
-        `${localServer}${McpManager.TOOL_NAME_DELIMITER}${splitToolName}`,
-      )
-      expanded.add(splitToolName)
-    }
-  }
-
-  if (hasFileOpsGroup) {
-    for (const splitToolName of LOCAL_FS_PATH_OPERATION_TOOL_NAMES) {
-      expanded.add(
-        `${localServer}${McpManager.TOOL_NAME_DELIMITER}${splitToolName}`,
-      )
-      expanded.add(splitToolName)
-    }
-  }
-
-  if (hasMemoryOpsGroup) {
-    for (const splitToolName of LOCAL_MEMORY_SPLIT_ACTION_TOOL_NAMES) {
-      expanded.add(
-        `${localServer}${McpManager.TOOL_NAME_DELIMITER}${splitToolName}`,
-      )
-      expanded.add(splitToolName)
-    }
-  }
-
-  return expanded
-}
-
-export const isMemoryToolAvailable = (toolName: string): boolean => {
-  try {
-    const parsed = parseToolName(toolName)
-    return (
-      parsed.serverName === getLocalFileToolServerName() &&
-      LOCAL_MEMORY_TOOL_NAMES.has(parsed.toolName)
-    )
-  } catch {
-    return LOCAL_MEMORY_TOOL_NAMES.has(toolName)
   }
 }
 
@@ -122,24 +63,11 @@ const isToolAllowed = ({
   return allowedToolNames.has(toolName)
 }
 
-const groupToolsByServer = (
-  tools: readonly McpTool[],
-): Map<string, McpTool[]> => {
-  const serverTools = new Map<string, McpTool[]>()
-  for (const tool of tools) {
-    let serverName: string
-    try {
-      serverName = parseToolName(tool.name).serverName
-    } catch {
-      continue
-    }
-    const bucket = serverTools.get(serverName) ?? []
-    bucket.push(tool)
-    serverTools.set(serverName, bucket)
-  }
-  return serverTools
-}
-
+/**
+ * The request's `tools` field — the outbound half of the model-facing name
+ * boundary (`toModelToolName`), so built-in tools are registered under their
+ * short names while MCP and module tools keep their server prefix.
+ */
 export const buildRequestTools = (
   toolDefinitions: McpTool[],
 ): RequestTool[] | undefined => {
@@ -150,7 +78,7 @@ export const buildRequestTools = (
   return toolDefinitions.map((tool) => ({
     type: 'function',
     function: {
-      name: tool.name,
+      name: toModelToolName(tool.name),
       description: tool.description,
       parameters: {
         ...tool.inputSchema,
@@ -161,10 +89,11 @@ export const buildRequestTools = (
 }
 
 /**
- * Rewrite tools whose schema depends on global settings. Currently only
- * `js_eval`, whose description and `timeoutMs` input bound both name the
- * exact `settings.jsSandbox` values in effect (network / vault read / $db /
- * external scripts / browser page reads + per-call timeout cap).
+ * Rewrite tools whose schema depends on global settings: `js_eval` (its
+ * description and `timeoutMs` bound name the exact `settings.jsSandbox`
+ * values in effect, and `$db.search` lists the knowledge bases),
+ * `vault_search` (its `knowledgeBase` argument lists them) and
+ * `delegate_subagent` (model options).
  *
  * The tool list from `listAvailableTools` is cached and settings-agnostic —
  * this is the single bridge that rebuilds the live tool spec. Every consumer
@@ -180,14 +109,25 @@ export function applyDynamicToolDescriptions(
   },
 ): McpTool[] {
   const jsSandboxFqn = `${getLocalFileToolServerName()}${McpManager.TOOL_NAME_DELIMITER}${JS_SANDBOX_TOOL_NAME}`
+  const vaultSearchFqn = `${getLocalFileToolServerName()}${McpManager.TOOL_NAME_DELIMITER}vault_search`
   const delegateSubagentFqn = `${getLocalFileToolServerName()}${McpManager.TOOL_NAME_DELIMITER}delegate_subagent`
   return tools.map((tool) => {
     if (tool.name === jsSandboxFqn) {
-      const live = getJsSandboxTool(ctx.jsSandboxSettings)
+      const live = getJsSandboxTool(
+        ctx.jsSandboxSettings,
+        ctx.settings?.knowledgeBases,
+      )
       return {
         ...tool,
         description: live.description,
         inputSchema: live.inputSchema,
+      }
+    }
+
+    if (tool.name === vaultSearchFqn && ctx.settings) {
+      return {
+        ...tool,
+        inputSchema: buildVaultSearchInputSchema(ctx.settings.knowledgeBases),
       }
     }
 
@@ -238,32 +178,57 @@ export const selectAllowedTools = async ({
   availableTools,
   allowedToolNames,
   toolPreferences,
+  toolServerPreferences,
+  model,
   apiType,
-  enableToolDisclosure = true,
   jsSandboxSettings = {},
   settings,
-  serverToolTokenBudgets,
 }: {
   availableTools: McpTool[]
   allowedToolNames?: string[]
   toolPreferences?: Record<string, AssistantToolPreference>
+  toolServerPreferences?: Record<string, AssistantToolServerPreference>
+  /** Decides whether the provider runs web search itself — see below. */
+  model: Pick<ChatModel, 'builtinToolProvider' | 'builtinTools'>
   apiType?: LLMProviderApiType | null
-  enableToolDisclosure?: boolean
   jsSandboxSettings?: JsSandboxSettings
   settings?: YoloSettings
-  serverToolTokenBudgets?: ReadonlyMap<string, number>
 }): Promise<{
   filteredTools: McpTool[]
   hasTools: boolean
-  hasMemoryTools: boolean
   hasOnDemandTools: boolean
   requestTools: RequestTool[] | undefined
-  serverToolTokenBudgets: ReadonlyMap<string, number>
+  /**
+   * Model-facing listing of the deferred tools, for the system prompt. `null`
+   * when nothing is deferred.
+   */
+  deferredToolCatalog: DeferredToolCatalog | null
 }> => {
-  const normalizedAllowedToolNames = expandAllowedToolNames(allowedToolNames)
+  // Post-D9 (docs/plans/2026-08-15-tool-registry/phase2-migration.md D9),
+  // `allowedToolNames` is always a fully-expanded list of real tool FQNs —
+  // `getEnabledAssistantToolNames` and `resolveAgentCapabilityProfile`
+  // (its only producers) both expand capabilities/tiers into member tool
+  // names before this is ever called, so no virtual group name can appear
+  // here (decision 12: no virtual tool names anywhere in the system).
+  const normalizedAllowedToolNames = allowedToolNames
+    ? new Set(allowedToolNames)
+    : undefined
+
+  // When the provider runs web search itself, offering ours too just gives the
+  // model two interchangeable options — and since the built-in reaches it as
+  // the bare `web_search`, it would collide outright with the hosted tool's
+  // protocol-fixed name. `web_scrape` still earns its place: hosted results
+  // carry titles and URLs but no page content.
+  const offeredTools = hasHostedWebSearch(model, apiType)
+    ? availableTools.filter(
+        (tool) =>
+          tool.name !==
+          getToolName(getLocalFileToolServerName(), WEB_SEARCH_TOOL_NAME),
+      )
+    : availableTools
 
   const baseFiltered = applyDynamicToolDescriptions(
-    availableTools.filter((tool) =>
+    offeredTools.filter((tool) =>
       isToolAllowed({
         toolName: tool.name,
         allowedToolNames: normalizedAllowedToolNames,
@@ -273,71 +238,85 @@ export const selectAllowedTools = async ({
   )
   const assistantLike = {
     toolPreferences,
+    toolServerPreferences,
     enabledToolNames: normalizedAllowedToolNames
       ? [...normalizedAllowedToolNames]
       : undefined,
   }
-  const resolvedServerToolTokenBudgets =
-    serverToolTokenBudgets ??
-    (await buildServerToolTokenBudgets(
-      groupToolsByServer(baseFiltered),
-      estimateJsonTokens,
-    ))
+  const isDeferredAndEnabled = (toolName: string): boolean =>
+    isToolAllowed({ toolName, allowedToolNames: normalizedAllowedToolNames }) &&
+    getAssistantToolDisclosureMode(assistantLike, toolName) === 'on_demand'
 
-  // Per-tool disclosure decisions for the filtered (non-loader) tools.
-  // Computed up front so the loader injection can ask "does any surviving
-  // tool actually need on-demand disclosure?" before adding itself.
-  const disclosureModes = new Map<string, 'always' | 'on_demand'>()
-  for (const tool of baseFiltered) {
-    disclosureModes.set(
-      tool.name,
-      getAssistantToolDisclosureMode(assistantLike, tool.name, {
-        enableToolDisclosure,
-        serverToolTokenBudgets: resolvedServerToolTokenBudgets,
-      }),
-    )
-  }
-
-  // Inject the protocol-level loader tool only when the on-demand disclosure
-  // mechanism is globally enabled AND at least one surviving tool would be
-  // sent as a stub. Without this guard the loader bloats every request prefix
-  // even for agents that don't need it; with a stub present but no loader,
-  // the model would have no way to reach the real schema (deadlock).
-  const loaderFqn = `${getLocalFileToolServerName()}${McpManager.TOOL_NAME_DELIMITER}${LOAD_TOOL_SCHEMAS_LOCAL_TOOL_NAME}`
-  const hasOnDemand = [...disclosureModes.values()].some(
-    (mode) => mode === 'on_demand',
-  )
-  const shouldInjectLoader = enableToolDisclosure && hasOnDemand
-  const filteredTools: McpTool[] = shouldInjectLoader
-    ? [getLoadToolSchemasToolFqn(), ...baseFiltered]
-    : baseFiltered
-
-  // All allowed tools — including on-demand stubs — are registered in the
-  // request's `tools` field for the entire conversation so the prompt-cache
-  // prefix stays frozen. On-demand tools start as stubs (name + short
-  // description + permissive schema) and stay stubs even after their full
-  // schema has been disclosed via load_tool_schemas: schemas now ride the messages
-  // stream (tool_result + compaction registry) instead of the tools field.
-  const requestToolDefinitions: McpTool[] = filteredTools.map((tool) => {
-    if (tool.name === loaderFqn) {
-      return tool
-    }
-    const disclosureMode = disclosureModes.get(tool.name) ?? 'always'
-    if (disclosureMode === 'on_demand') {
-      return buildToolStub(tool, apiType)
-    }
-    return tool
+  // The catalog is derived from the *tool sets* the user has configured or a
+  // module has registered — not from what happens to be connected right now.
+  // That distinction is what makes the prefix stable: a server dropping off
+  // must not delete its catalog entries, nor take the protocol tools with it.
+  const configuredServers = settings?.mcp.servers ?? []
+  const toolSets = [
+    ...describeMcpToolSets({
+      configuredServers,
+      discoveredCatalogs: settings?.mcp.discoveredCatalogs ?? {},
+    }),
+    ...describeInProcessToolSets({
+      availableTools,
+      configuredServerIds: new Set(configuredServers.map((s) => s.id)),
+    }),
+  ]
+  const deferredToolCatalog = buildDeferredToolCatalog({
+    toolSets,
+    isDeferredAndEnabled,
   })
+
+  // Derived from the catalog rather than from `availableTools`: an offline
+  // server's tools are absent from the live list, and reading `hasOnDemand`
+  // off that list would let a disconnect strip the protocol tools out of the
+  // frozen `tools` field.
+  const hasOnDemand = deferredToolCatalog !== null
+
+  // The two protocol tools are injected only when something actually defers.
+  // Without the guard they bloat every request prefix for agents that never
+  // need them; with a deferred tool but no protocol tools, the model would
+  // have no way to reach the real schema at all (deadlock).
+  const protocolTools: McpTool[] = hasOnDemand
+    ? [getLoadToolSchemasToolFqn(), getInvokeToolFqn(apiType)]
+    : []
+  const filteredTools: McpTool[] = [...protocolTools, ...baseFiltered]
+
+  // Deferred tools are not registered at all — they live in the system-prompt
+  // catalog as bare names and are reached through `invoke_tool`. The `tools`
+  // field therefore holds only the always-tier plus the two protocol tools.
+  const requestToolDefinitions: McpTool[] = filteredTools.filter(
+    (tool) =>
+      protocolTools.some((protocolTool) => protocolTool.name === tool.name) ||
+      getAssistantToolDisclosureMode(assistantLike, tool.name) === 'always',
+  )
 
   return {
     filteredTools,
     hasTools: filteredTools.length > 0,
-    hasMemoryTools: filteredTools.some((tool) =>
-      isMemoryToolAvailable(tool.name),
-    ),
     hasOnDemandTools: hasOnDemand,
     requestTools: buildRequestTools(requestToolDefinitions),
-    serverToolTokenBudgets: resolvedServerToolTokenBudgets,
+    deferredToolCatalog,
+  }
+}
+
+function getInvokeToolFqn(apiType?: LLMProviderApiType | null): McpTool {
+  const tool = getInvokeTool(apiType)
+  return {
+    ...tool,
+    name: `${getLocalFileToolServerName()}${McpManager.TOOL_NAME_DELIMITER}${tool.name}`,
+  }
+}
+
+export const isInvokeToolName = (toolName: string): boolean => {
+  try {
+    const parsed = parseToolName(toolName)
+    return (
+      parsed.serverName === getLocalFileToolServerName() &&
+      parsed.toolName === INVOKE_TOOL_NAME
+    )
+  } catch {
+    return toolName === INVOKE_TOOL_NAME
   }
 }
 

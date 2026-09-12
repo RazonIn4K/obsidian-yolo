@@ -2,13 +2,14 @@ import { App, normalizePath } from 'obsidian'
 import path from 'path-browserify'
 import { v4 as uuidv4 } from 'uuid'
 
-import { ensureJsonDbRootDir } from '../../../core/paths/yoloManagedData'
-import { getYoloJsonDbRootDir } from '../../../core/paths/yoloPaths'
+import { ensureUserDataRootDir } from '../../../core/paths/yoloManagedData'
+import { getYoloUserDataRootDir } from '../../../core/paths/yoloPaths'
+import { editUndoSnapshotStore } from '../../../utils/chat/editUndoSnapshotStore'
+import { deleteEditReviewSnapshotStore } from '../../edit-review/editReviewSnapshotStore'
 import { AbstractJsonRepository } from '../base'
 import { CHAT_DIR } from '../constants'
 import { EmptyChatTitleException } from '../exception'
 
-import { deleteEditReviewSnapshotStore } from './editReviewSnapshotStore'
 import { deletePromptSnapshotStore } from './promptSnapshotStore'
 import {
   CHAT_SCHEMA_VERSION,
@@ -37,9 +38,9 @@ export class ChatManager extends AbstractJsonRepository<
     } | null,
   ) {
     const normalizedSettings = settings ?? null
-    super(app, `${getYoloJsonDbRootDir(settings)}/${CHAT_DIR}`, {
+    super(app, `${getYoloUserDataRootDir(settings)}/${CHAT_DIR}`, {
       prepareDataDir: async () => {
-        const rootDir = await ensureJsonDbRootDir(app, normalizedSettings)
+        const rootDir = await ensureUserDataRootDir(app, normalizedSettings)
         return normalizePath(`${rootDir}/${CHAT_DIR}`)
       },
     })
@@ -159,6 +160,19 @@ export class ChatManager extends AbstractJsonRepository<
     }
 
     const nextFileName = this.generateFileName(updatedChat)
+
+    // A write that changes nothing but `updatedAt` still marks both the
+    // conversation file and the index dirty for whatever syncs the vault, so
+    // skip it. `updatedAt` tracks content changes; leaving it untouched when
+    // the content is identical is the correct reading of the field, not a
+    // compromise.
+    if (
+      nextFileName === targetMetadata.fileName &&
+      this.contentSignature(updatedChat) === this.contentSignature(chat)
+    ) {
+      return chat
+    }
+
     const nextPath = normalizePath(path.join(this.dataDir, nextFileName))
     await this.writeFile(nextPath, JSON.stringify(updatedChat, null, 2))
     if (targetMetadata.fileName !== nextFileName) {
@@ -175,7 +189,8 @@ export class ChatManager extends AbstractJsonRepository<
 
     await this.delete(targetMetadata.fileName)
     await deletePromptSnapshotStore(this.app, id, this.settings)
-    await deleteEditReviewSnapshotStore(this.app, id, this.settings)
+    await deleteEditReviewSnapshotStore(this.app, id)
+    editUndoSnapshotStore.deleteConversation(id)
     await this.removeFromIndex(id)
     return true
   }
@@ -209,6 +224,13 @@ export class ChatManager extends AbstractJsonRepository<
 
     await this.writeIndexIfChanged(cachedList, reconciled)
     return this.sortByUpdatedAt(reconciled)
+  }
+
+  // Key order is stable here because the compared objects are both derived from
+  // the same stored conversation via spread, so a plain stringify is enough.
+  private contentSignature(chat: ChatConversation): string {
+    const { updatedAt: _updatedAt, ...rest } = chat
+    return JSON.stringify(rest)
   }
 
   private async readSafe(fileName: string): Promise<ChatConversation | null> {
@@ -265,7 +287,7 @@ export class ChatManager extends AbstractJsonRepository<
   private toMetadata(
     source: Pick<
       ChatConversation,
-      'id' | 'title' | 'updatedAt' | 'schemaVersion' | 'origin'
+      'id' | 'title' | 'updatedAt' | 'schemaVersion' | 'origin' | 'cliSession'
     > & { isPinned?: boolean; pinnedAt?: number },
   ): ChatConversationMetadata {
     return {
@@ -276,6 +298,7 @@ export class ChatManager extends AbstractJsonRepository<
       isPinned: source.isPinned ?? false,
       pinnedAt: source.pinnedAt,
       origin: getChatConversationOrigin(source),
+      cliSession: source.cliSession,
     }
   }
 
@@ -338,6 +361,7 @@ export class ChatManager extends AbstractJsonRepository<
       isPinned: chat.isPinned ?? false,
       pinnedAt: chat.pinnedAt,
       origin: getChatConversationOrigin(chat),
+      cliSession: chat.cliSession,
     }
     if (targetIndex === -1) {
       normalized.push(entry)

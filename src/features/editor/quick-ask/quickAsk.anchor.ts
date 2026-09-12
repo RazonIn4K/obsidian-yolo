@@ -10,6 +10,8 @@
 
 import type { EditorView } from '@codemirror/view'
 
+import { getNodeWindow } from '../../../utils/dom/window-context'
+
 /**
  * Minimal rect shape used throughout the anchor API.
  * Using a structural type so both CM's Rect and DOMRect satisfy it.
@@ -49,6 +51,15 @@ export type QuickAskAnchor = {
    */
   getSelectionRects: () => { startRect: AnchorRect; endRect: AnchorRect } | null
   /**
+   * Tells the overlay the anchor has moved without the DOM scrolling.
+   *
+   * Scroll and resize events cover every anchor that lives in a scroller. A
+   * surface that moves its content by transform — a board panning under the
+   * cursor — emits neither, so it says so itself. Returns an unsubscribe.
+   * Only implemented by anchors that need it.
+   */
+  subscribe?: (onMove: () => void) => () => void
+  /**
    * Whether the anchor is still valid.
    * For PDF: checks that the live Range still has client rects.
    * Always returns true for CM anchors.
@@ -62,6 +73,7 @@ export function createCmAnchor(
   view: EditorView,
   pos: number,
   selectionAnchor: { from: number; to: number } | null,
+  options?: { subscribe?: (onMove: () => void) => () => void },
 ): QuickAskAnchor {
   const resolveHostEl = (): HTMLElement => {
     const viewDom = view.dom
@@ -81,6 +93,7 @@ export function createCmAnchor(
   return {
     hostEl: resolveHostEl(),
     scrollEl: view.scrollDOM ?? null,
+    ...(options?.subscribe ? { subscribe: options.subscribe } : {}),
 
     getDockReferenceRect(): DOMRect {
       const leafContent = view.dom?.closest('.workspace-leaf-content')
@@ -91,7 +104,7 @@ export function createCmAnchor(
       if (scrollRect) return scrollRect
       return (
         view.dom?.getBoundingClientRect() ??
-        document.body.getBoundingClientRect()
+        view.dom.ownerDocument.body.getBoundingClientRect()
       )
     },
 
@@ -100,10 +113,14 @@ export function createCmAnchor(
       const scrollRect = scrollDom?.getBoundingClientRect()
       const sizer = scrollDom?.querySelector('.cm-sizer')
       const sizerRect = sizer?.getBoundingClientRect()
+      // The editor's own document, not the global one: in a popout the
+      // theme variable lives on that window's root element, and the main
+      // window's value is not the one this view is laid out with.
+      const rootEl = view.dom.ownerDocument.documentElement
       const fallbackWidth = parseInt(
-        getComputedStyle(document.documentElement).getPropertyValue(
-          '--file-line-width',
-        ) || '720',
+        getNodeWindow(rootEl)
+          .getComputedStyle(rootEl)
+          .getPropertyValue('--file-line-width') || '720',
         10,
       )
       const width = sizerRect?.width ?? scrollRect?.width ?? fallbackWidth

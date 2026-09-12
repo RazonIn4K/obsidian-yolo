@@ -1,3 +1,20 @@
+/**
+ * The owner of an agent *session*: conversation state, its persistence, and
+ * the approval and question pauses that have to be answered by a human in a
+ * chat surface. A session outlives any single run — it is what a chat view
+ * subscribes to, reloads, branches, and resumes.
+ *
+ * `NativeAgentRuntime` (native-runtime.ts) sits below it and owns the loop
+ * itself: LLM turns, tool calls, compaction, guardrails. `AgentRunApi`
+ * (agent-api.ts) sits above it and turns one programmatic call into an event
+ * stream for callers that have no conversation of their own.
+ *
+ * Only a caller that actually holds a conversation — the chat views — should
+ * use this class directly. Everyone else (host features under `src/features/`,
+ * and modules arriving through `host.agent.stream`) goes through `AgentRunApi`
+ * and states a trust tier as `capability` rather than assembling a run input
+ * here.
+ */
 import { v4 as uuidv4 } from 'uuid'
 
 import type { YoloSettings } from '../../settings/schema/setting.types'
@@ -18,13 +35,23 @@ import {
   getToolCallArgumentsObject,
 } from '../../types/tool-call.types'
 import { formatErrorMessageWithCauses } from '../../utils/error-message'
+import {
+  acquireBackgroundExecution,
+  runWithBackgroundExecution,
+} from '../background/backgroundExecutionController'
 import { captureLLMDebugOperation } from '../llm/debugCapture'
 import {
   TERMINAL_COMMAND_TOOL_NAME,
   getLocalFileToolServerName,
 } from '../mcp/localFileTools'
 import { parseToolName } from '../mcp/tool-name-utils'
+import { getExtraAllowanceKeysForRequest } from '../tools/native/paths'
 
+import {
+  type AssistantRenderStreamListener,
+  AssistantRenderStreamStore,
+  type AssistantRenderStreamValue,
+} from './assistantRenderStreamStore'
 import {
   type BackgroundTaskEvent,
   backgroundTaskCompletionBus,
@@ -49,11 +76,7 @@ import {
 import { subagentTaskRegistry } from './subagent/task-registry'
 import type { SubagentTaskRecord } from './subagent/types'
 import { SystemPromptSnapshotStore } from './systemPromptSnapshotStore'
-import {
-  AgentRunContext,
-  AgentRuntimeLoopConfig,
-  AgentRuntimeRunInput,
-} from './types'
+import { AgentRuntimeLoopConfig, AgentRuntimeRunInput } from './types'
 
 export type AgentRunStatus =
   | 'idle'
@@ -75,10 +98,9 @@ export type AgentConversationState = {
 }
 
 export type AgentRunActivity = {
-  kind: 'learning-agent'
+  kind: `module:${string}`
   title: string
   detail?: string
-  action?: 'open-learning-view'
 }
 
 const createEmptyConversationState = (
@@ -142,7 +164,6 @@ export type AgentConversationRunSummarySubscriber = (
 type PendingApprovalRecoveryContext = {
   lastRunInput: AgentRuntimeRunInput
   lastLoopConfig: AgentRuntimeLoopConfig
-  lastRunContext: AgentRunContext | null
 }
 
 type ConversationEntry = {
@@ -167,47 +188,16 @@ type AgentRunEntry = {
   runToken: symbol | null
   lastRunInput: AgentRuntimeRunInput | null
   lastLoopConfig: AgentRuntimeLoopConfig | null
-  // Holds the citationRegistry for the run currently associated with this
-  // entry, so manual-approval/recovery paths (which call mcpManager.callTool
-  // directly, bypassing the loop-worker) can attach citations the same way
-  // auto-executed tool calls do.
-  lastRunContext: AgentRunContext | null
 }
 
-type ConversationPublishMode = 'immediate' | 'scheduled'
+/**
+ * `stream-only`：本次运行时快照只改变了生成中 assistant 消息的 content /
+ * reasoning。权威状态照常更新，但不发布会话快照——这些字节走 assistant render
+ * stream 直达展示层，会话订阅者保留上一次结构折回值。
+ */
+type ConversationPublishMode = 'immediate' | 'stream-only'
 
-type PendingScheduledConversationPublish = {
-  rafId: number | null
-  timeoutId: ReturnType<typeof setTimeout>
-}
-
-type RuntimeMessageSignature = {
-  role: ChatMessage['role']
-  id: string
-  ref: ChatMessage
-  content?: string
-  reasoning?: string
-  generationState?: NonNullable<
-    ChatAssistantMessage['metadata']
-  >['generationState']
-  assistantMetadataKey?: string
-  assistantAnnotationsKey?: string
-  assistantToolCallRequestsKey?: string
-  toolResponseStatusKey?: string
-  taskStatus?: string
-}
-
-type RuntimeStateSignature = {
-  status: AgentRunStatus
-  runId?: number
-  anchorMessageId?: string
-  errorMessage?: string
-  pendingCompactionAnchorMessageId?: string | null
-  compactionKey: string
-  messages: RuntimeMessageSignature[]
-}
-
-type AgentServiceOptions = {
+type AgentSessionServiceOptions = {
   getSettings?: () => YoloSettings
   persistConversationMessages?: (payload: {
     conversationId: string
@@ -222,6 +212,12 @@ export type AgentReplaceConversationMessagesReason =
   | 'mutation'
   | 'hydrate'
   | 'self-heal'
+
+// Lower bound between two conversation writes while a run is in flight. Vault
+// files are commonly on a sync backend that uploads whole files, so writing a
+// conversation faster than one upload cycle makes the backend race its own
+// in-flight upload of the same file.
+export const RUNNING_PERSIST_MIN_INTERVAL_MS = 15_000
 
 function buildSubagentResultMessage(
   record: SubagentTaskRecord,
@@ -357,74 +353,94 @@ const reconcileAssistantGenerationState = (
   })
 }
 
-const stringifySignaturePart = (value: unknown): string =>
-  value === undefined ? '' : JSON.stringify(value)
-
-const createRuntimeMessageSignature = (
-  message: ChatMessage,
-): RuntimeMessageSignature => {
-  if (message.role === 'assistant') {
-    return {
-      role: message.role,
-      id: message.id,
-      ref: message,
-      content: message.content,
-      reasoning: message.reasoning,
-      generationState: message.metadata?.generationState,
-      assistantMetadataKey: stringifySignaturePart(message.metadata),
-      assistantAnnotationsKey: stringifySignaturePart(message.annotations),
-      assistantToolCallRequestsKey: stringifySignaturePart(
-        message.toolCallRequests,
-      ),
-    }
-  }
-
-  if (message.role === 'tool') {
-    return {
-      role: message.role,
-      id: message.id,
-      ref: message,
-      toolResponseStatusKey: message.toolCalls
-        .map((toolCall) => `${toolCall.request.id}:${toolCall.response.status}`)
-        .join('|'),
-    }
-  }
-
-  if (
-    message.role === 'terminal_command_result' ||
-    message.role === 'subagent_result' ||
-    message.role === 'external_agent_result'
-  ) {
-    return {
-      role: message.role,
-      id: message.id,
-      ref: message,
-      taskStatus: message.status,
-    }
-  }
-
-  return {
-    role: message.role,
-    id: message.id,
-    ref: message,
-  }
+// Runtime message identity is a contract enforced upstream (llm-turn-executor,
+// NativeAgentRuntime): a message's object reference changes if and only if
+// its content changed. That lets publish-mode detection compare references
+// instead of deep- or stringify-comparing every message on every delta.
+const sameCompactionState = (
+  previous: ChatConversationCompactionState | undefined,
+  next: ChatConversationCompactionState | undefined,
+): boolean => {
+  const previousEntries = previous ?? []
+  const nextEntries = next ?? []
+  return (
+    previousEntries.length === nextEntries.length &&
+    previousEntries.every((entry, index) => entry === nextEntries[index])
+  )
 }
 
-const createRuntimeStateSignature = (
-  state: AgentConversationState,
-): RuntimeStateSignature => ({
-  status: state.status,
-  runId: state.runId,
-  anchorMessageId: state.anchorMessageId,
-  errorMessage: state.errorMessage,
-  pendingCompactionAnchorMessageId: state.pendingCompactionAnchorMessageId,
-  compactionKey: stringifySignaturePart(state.compaction ?? []),
-  messages: state.messages.map(createRuntimeMessageSignature),
-})
+// 唯一允许绕开会话快照、走 assistant render stream 的字段。
+const ASSISTANT_RENDER_STREAM_FIELDS: ReadonlySet<string> = new Set([
+  'content',
+  'reasoning',
+])
+
+/**
+ * 正面判定：两条 assistant 消息除 content / reasoning 外逐字段相等，且两侧都
+ * 处于 streaming。遍历键集合而不是列举要排除的字段，`ChatAssistantMessage`
+ * 将来新增的任何字段都会自动落到"语义事件"一侧，而不是被默默当成展示态。
+ */
+const isAssistantRenderStreamOnlyChange = (
+  previousMessage: ChatMessage,
+  nextMessage: ChatMessage,
+): boolean => {
+  if (
+    previousMessage.role !== 'assistant' ||
+    nextMessage.role !== 'assistant'
+  ) {
+    return false
+  }
+  if (
+    previousMessage.metadata?.generationState !== 'streaming' ||
+    nextMessage.metadata?.generationState !== 'streaming'
+  ) {
+    return false
+  }
+
+  const previousFields = previousMessage as unknown as Record<string, unknown>
+  const nextFields = nextMessage as unknown as Record<string, unknown>
+  for (const key of new Set([
+    ...Object.keys(previousFields),
+    ...Object.keys(nextFields),
+  ])) {
+    if (ASSISTANT_RENDER_STREAM_FIELDS.has(key)) {
+      continue
+    }
+    if (previousFields[key] !== nextFields[key]) {
+      return false
+    }
+  }
+  return true
+}
+
+/**
+ * 等价于 `value.trim().length > 0`，但不复制整串：正文的每个 delta 都会走到
+ * 这里，`trim()` 会让判定退化成随正文长度增长的 O(n) 复制。
+ */
+const hasVisibleText = (value: string): boolean => /\S/.test(value)
+
+/**
+ * 首次出现的正文 / 思考文本是结构事件：树上多处 gate 依赖"这条消息有没有正文
+ * 或思考"（shell 是否显示、思考块是否还在 thinking 态、答案项的类名）。让第一段
+ * 文本随快照折回一次，这些 gate 仍由快照决定，叶子只负责其后的纯增量。
+ *
+ * 判据必须与那些 gate 完全一致——它们一律是 `trim().length > 0`。按 `length`
+ * 判定会在 provider 第一段吐出 `"\n"` / 空格时错位：折回一次快照，但快照里
+ * `content.trim()` 仍为空，gate 保持 false；等真正的第一个可见字符到来时
+ * `length === 0` 已经不成立，只走 stream，于是整段生成期间 gate 都不会翻转。
+ */
+const hasFirstRenderStreamFieldAppearance = (
+  previousMessage: ChatAssistantMessage,
+  nextMessage: ChatAssistantMessage,
+): boolean =>
+  (!hasVisibleText(previousMessage.content) &&
+    hasVisibleText(nextMessage.content)) ||
+  (!hasVisibleText(previousMessage.reasoning ?? '') &&
+    hasVisibleText(nextMessage.reasoning ?? ''))
 
 const getRuntimeSnapshotPublishMode = (
-  previousState: RuntimeStateSignature,
-  nextState: RuntimeStateSignature,
+  previousState: AgentConversationState,
+  nextState: AgentConversationState,
 ): ConversationPublishMode => {
   if (
     previousState.status !== nextState.status ||
@@ -433,110 +449,70 @@ const getRuntimeSnapshotPublishMode = (
     previousState.errorMessage !== nextState.errorMessage ||
     previousState.pendingCompactionAnchorMessageId !==
       nextState.pendingCompactionAnchorMessageId ||
-    previousState.compactionKey !== nextState.compactionKey ||
+    !sameCompactionState(previousState.compaction, nextState.compaction) ||
     previousState.messages.length !== nextState.messages.length
   ) {
     return 'immediate'
   }
 
-  let displayOnlyAssistantChanges = 0
+  let renderStreamOnlyChanges = 0
 
   for (let index = 0; index < previousState.messages.length; index += 1) {
     const previousMessage = previousState.messages[index]
     const nextMessage = nextState.messages[index]
-    if (!nextMessage) {
-      return 'immediate'
-    }
-    if (
-      previousMessage.role === nextMessage.role &&
-      previousMessage.id === nextMessage.id &&
-      previousMessage.ref === nextMessage.ref &&
-      previousMessage.content === nextMessage.content &&
-      previousMessage.reasoning === nextMessage.reasoning &&
-      previousMessage.generationState === nextMessage.generationState &&
-      previousMessage.assistantMetadataKey ===
-        nextMessage.assistantMetadataKey &&
-      previousMessage.assistantAnnotationsKey ===
-        nextMessage.assistantAnnotationsKey &&
-      previousMessage.assistantToolCallRequestsKey ===
-        nextMessage.assistantToolCallRequestsKey &&
-      previousMessage.toolResponseStatusKey ===
-        nextMessage.toolResponseStatusKey &&
-      previousMessage.taskStatus === nextMessage.taskStatus
-    ) {
+    if (previousMessage === nextMessage) {
       continue
     }
+    if (!isAssistantRenderStreamOnlyChange(previousMessage, nextMessage)) {
+      return 'immediate'
+    }
     if (
-      previousMessage.role !== 'assistant' ||
-      nextMessage.role !== 'assistant'
+      hasFirstRenderStreamFieldAppearance(
+        previousMessage as ChatAssistantMessage,
+        nextMessage as ChatAssistantMessage,
+      )
     ) {
       return 'immediate'
     }
 
-    if (
-      previousMessage.id !== nextMessage.id ||
-      previousMessage.generationState !== 'streaming' ||
-      nextMessage.generationState !== 'streaming' ||
-      (previousMessage.content === nextMessage.content &&
-        previousMessage.reasoning === nextMessage.reasoning) ||
-      previousMessage.assistantAnnotationsKey !==
-        nextMessage.assistantAnnotationsKey ||
-      previousMessage.assistantToolCallRequestsKey !==
-        nextMessage.assistantToolCallRequestsKey ||
-      previousMessage.assistantMetadataKey !== nextMessage.assistantMetadataKey
-    ) {
-      return 'immediate'
-    }
-
-    displayOnlyAssistantChanges += 1
-    if (displayOnlyAssistantChanges > 1) {
+    renderStreamOnlyChanges += 1
+    if (renderStreamOnlyChanges > 1) {
       return 'immediate'
     }
   }
 
-  return displayOnlyAssistantChanges === 1 ? 'scheduled' : 'immediate'
+  return renderStreamOnlyChanges === 1 ? 'stream-only' : 'immediate'
 }
 
-const cloneMessageForSnapshot = (message: ChatMessage): ChatMessage => {
-  if (message.role === 'assistant') {
-    return {
-      ...message,
-      metadata: message.metadata ? { ...message.metadata } : undefined,
-      annotations: message.annotations ? [...message.annotations] : undefined,
-      toolCallRequests: message.toolCallRequests?.map((request) => ({
-        ...request,
-      })),
-    }
-  }
+// Dev-only enforcement of the reference-identity contract: published state
+// must never be mutated in place. `Object.isFrozen` short-circuits already
+// frozen subtrees, so under structural sharing this only does real work on
+// the messages/objects that actually changed this round.
+//
+// Only plain objects and arrays are frozen. Class instances are live foreign
+// objects outside the immutability contract — e.g. mentionables hold TFile
+// references, and freezing one would crawl through `file.vault` into
+// Obsidian's entire app graph, breaking the app (frozen workspace/events).
+const isPlainStateValue = (value: object): boolean => {
+  if (Array.isArray(value)) return true
+  const proto: unknown = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
 
-  if (message.role === 'tool') {
-    return {
-      ...message,
-      toolCalls: message.toolCalls.map((toolCall) => ({
-        request: { ...toolCall.request },
-        response: { ...toolCall.response },
-      })),
-      metadata: message.metadata ? { ...message.metadata } : undefined,
-    }
+const deepFreezeForDev = <T>(value: T): T => {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    Object.isFrozen(value) ||
+    !isPlainStateValue(value)
+  ) {
+    return value
   }
-
-  if (message.role === 'user') {
-    return {
-      ...message,
-      mentionables: [...message.mentionables],
-      selectedSkills: message.selectedSkills
-        ? [...message.selectedSkills]
-        : undefined,
-      selectedModelIds: message.selectedModelIds
-        ? [...message.selectedModelIds]
-        : undefined,
-    }
+  Object.freeze(value)
+  for (const key of Object.getOwnPropertyNames(value)) {
+    deepFreezeForDev((value as Record<string, unknown>)[key])
   }
-
-  return {
-    ...message,
-    metadata: message.metadata ? { ...message.metadata } : undefined,
-  }
+  return value
 }
 
 const abortVisibleMessages = (messages: ChatMessage[]): ChatMessage[] => {
@@ -976,7 +952,7 @@ export type AbortedQueuedMessagesSubscriber = (
 
 type ForegroundToolAborter = () => void
 
-export class AgentService {
+export class AgentSessionService {
   private conversationEntries = new Map<string, ConversationEntry>()
   private runEntriesByKey = new Map<string, AgentRunEntry>()
   private foregroundToolAbortersByConversation = new Map<
@@ -987,10 +963,7 @@ export class AgentService {
   private stateFeedSubscribers = new Set<AgentConversationStateFeedSubscriber>()
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private persistenceChains = new Map<string, Promise<void>>()
-  private pendingScheduledConversationPublishes = new Map<
-    string,
-    PendingScheduledConversationPublish
-  >()
+  private lastPersistedAt = new Map<string, number>()
   private droppedConversationIds = new Set<string>()
   /** pending background task results per conversation (queued while streaming) */
   private pendingBackgroundTaskResults = new Map<
@@ -1025,8 +998,36 @@ export class AgentService {
    */
   private readonly systemPromptSnapshotStore = new SystemPromptSnapshotStore()
   private readonly promptSourceWatcher = new PromptSourceWatcher()
+  /**
+   * 生成中 assistant 消息的展示态流。通道所有权在这里而不是 ChatSessionController：
+   * 后者每个 ChatView 一份，会让多窗口各存一份缓冲；而 runtime 快照、中断、
+   * tool boundary、完成、分支这些生命周期都由本单例掌握。
+   */
+  private readonly assistantRenderStreams = new AssistantRenderStreamStore()
 
-  constructor(private readonly options: AgentServiceOptions = {}) {}
+  constructor(private readonly options: AgentSessionServiceOptions = {}) {}
+
+  getAssistantRenderStream(
+    conversationId: string,
+    messageId: string,
+  ): AssistantRenderStreamValue | undefined {
+    return this.assistantRenderStreams.getAssistantRenderStream(
+      conversationId,
+      messageId,
+    )
+  }
+
+  subscribeAssistantRenderStream(
+    conversationId: string,
+    messageId: string,
+    listener: AssistantRenderStreamListener,
+  ): () => void {
+    return this.assistantRenderStreams.subscribeAssistantRenderStream(
+      conversationId,
+      messageId,
+      listener,
+    )
+  }
 
   /** Shared system-prompt snapshot store, injected into RCB at construction. */
   getSystemPromptSnapshotStore(): SystemPromptSnapshotStore {
@@ -1049,7 +1050,7 @@ export class AgentService {
   dropConversation(conversationId: string): void {
     this.droppedConversationIds.add(conversationId)
     this.evictSystemPromptSnapshot(conversationId)
-    this.cancelScheduledConversationPublish(conversationId)
+    this.assistantRenderStreams.dropConversation(conversationId)
     this.cancelPersistTimer(conversationId)
 
     const entry = this.conversationEntries.get(conversationId)
@@ -1079,6 +1080,7 @@ export class AgentService {
 
     this.autoRunScheduled.delete(conversationId)
     this.pendingBackgroundTaskResults.delete(conversationId)
+    this.lastPersistedAt.delete(conversationId)
     this.conversationEntries.delete(conversationId)
 
     if (droppedState) {
@@ -1519,11 +1521,6 @@ export class AgentService {
     const lastRunInput = activeRunInput ?? recoveryContext?.lastRunInput ?? null
     const lastLoopConfig =
       activeLoopConfig ?? recoveryContext?.lastLoopConfig ?? null
-    const lastRunContext =
-      located.runEntry?.lastRunContext ??
-      recoveryContext?.lastRunContext ??
-      null
-
     if (!lastRunInput || !lastLoopConfig) {
       return false
     }
@@ -1559,11 +1556,26 @@ export class AgentService {
     }
 
     if (allowForConversation) {
-      lastRunInput.mcpManager.allowToolForConversation(
-        toolCall.request.name,
-        conversationId,
-        getToolCallArgumentsObject(toolCall.request.arguments),
-      )
+      if (toolCall.request.metadata?.approvalPolicy === 'always-require-user') {
+        // Module chat mode tools declared `requiresApproval: true` are an
+        // unconditional per-call confirmation gate (see
+        // `tool-gateway.ts`'s `attachModuleChatModeSnapshot` /
+        // `resolveInitialResponse`). The UI hides the "allow for this
+        // conversation" option for these calls (see `ToolMessage.tsx`), but
+        // this is the enforcement point of last resort — never honor the
+        // flag even if a caller passes it.
+        console.warn(
+          '[YOLO] Ignoring allowForConversation: tool call approval policy is always-require-user',
+          { conversationId, toolCallId, toolName: toolCall.request.name },
+        )
+      } else {
+        lastRunInput.mcpManager.allowToolForConversation(
+          toolCall.request.name,
+          conversationId,
+          getToolCallArgumentsObject(toolCall.request.arguments),
+          getExtraAllowanceKeysForRequest(toolCall.request),
+        )
+      }
     }
 
     const messagesBeforeApproval =
@@ -1584,39 +1596,49 @@ export class AgentService {
       messagesBeforeApproval,
       toolCall.request.id,
     )
-    const result = await captureLLMDebugOperation({
-      traceId: debugTraceId,
-      signal: lastRunInput.abortSignal,
-      transportMode: 'mcp',
-      url: `mcp://${toolCall.request.name}`,
-      method: 'callTool',
-      requestBody: {
-        name: toolCall.request.name,
-        args: toolArgs,
-        id: toolCall.request.id,
-        conversationId,
-        roundId: toolMessage.id,
-        chatModelId: lastRunInput.model.id,
-      },
-      responseContentType: 'application/json',
-      run: () =>
-        lastRunInput.mcpManager.callTool({
+    const result = await runWithBackgroundExecution(() =>
+      captureLLMDebugOperation({
+        traceId: debugTraceId,
+        signal: lastRunInput.abortSignal,
+        transportMode: 'mcp',
+        url: `mcp://${toolCall.request.name}`,
+        method: 'callTool',
+        requestBody: {
           name: toolCall.request.name,
           args: toolArgs,
           id: toolCall.request.id,
           conversationId,
-          conversationMessages: runningMessages,
           roundId: toolMessage.id,
           chatModelId: lastRunInput.model.id,
-          workspaceScope: lastRunInput.workspaceScope,
-          runContext: lastRunContext ?? undefined,
-          subagentParentContext: buildSubagentParentContext(
-            lastRunInput,
-            lastLoopConfig,
-          ),
-        }),
-      getResponseBody: (response) => response,
-    })
+        },
+        responseContentType: 'application/json',
+        run: () =>
+          lastRunInput.mcpManager.callTool({
+            name: toolCall.request.name,
+            args: toolArgs,
+            id: toolCall.request.id,
+            conversationId,
+            conversationMessages: runningMessages,
+            roundId: toolMessage.id,
+            chatModelId: lastRunInput.model.id,
+            workspaceScope: lastRunInput.workspaceScope,
+            subagentParentContext: buildSubagentParentContext(
+              lastRunInput,
+              lastLoopConfig,
+            ),
+            // This call bypasses `AgentToolGateway` (approval already
+            // happened), so it can't read the gateway's live `bashReadOnly`
+            // option — read the persisted snapshot instead. See
+            // `ToolCallRequest.metadata.executionConstraints`.
+            bashReadOnly:
+              toolCall.request.metadata?.executionConstraints?.bashReadOnly,
+            capabilityForceEnabled:
+              toolCall.request.metadata?.executionConstraints
+                ?.capabilityForceEnabled,
+          }),
+        getResponseBody: (response) => response,
+      }),
+    )
 
     const nextMessages = this.updateToolCallResponse({
       conversationId,
@@ -1874,6 +1896,7 @@ export class AgentService {
         request.name,
         entry.parentConversationId,
         getToolCallArgumentsObject(request.arguments),
+        getExtraAllowanceKeysForRequest(request),
       )
     }
 
@@ -1884,14 +1907,20 @@ export class AgentService {
     const toolArgs = getToolCallArgumentsObject(request.arguments)
     let result: ToolCallResponse
     try {
-      result = await entry.mcpManager.callTool({
-        name: request.name,
-        args: toolArgs,
-        id: request.id,
-        conversationId: entry.parentConversationId,
-        conversationMessages: entry.runtime.getMessages(),
-        roundId: located.toolMessage.id,
-      })
+      result = await runWithBackgroundExecution(() =>
+        entry.mcpManager.callTool({
+          name: request.name,
+          args: toolArgs,
+          id: request.id,
+          conversationId: entry.parentConversationId,
+          conversationMessages: entry.runtime.getMessages(),
+          roundId: located.toolMessage.id,
+          // Same snapshot the parent path reads: a subagent inherits the
+          // parent mode's capability grant, so its approved calls must too.
+          capabilityForceEnabled:
+            request.metadata?.executionConstraints?.capabilityForceEnabled,
+        }),
+      )
     } catch (error) {
       result = {
         status: ToolCallResponseStatus.Error,
@@ -2158,12 +2187,14 @@ export class AgentService {
     runEntry.lastLoopConfig = loopConfig
 
     const citationRegistry = new CitationRegistry()
-    const runContext: AgentRunContext = { citationRegistry }
-    runEntry.lastRunContext = runContext
+    // The visible-history prefix belongs to the run's original input. Keep
+    // this anchor stable even when a queued user message becomes the source
+    // for subsequent assistant/tool messages within the same runtime.
+    const historyMergeAnchorMessageId =
+      input.sourceUserMessageId ?? input.messages.at(-1)?.id
 
     const runtimeInput: AgentRuntimeRunInput = {
       ...input,
-      runContext,
       drainPendingUserMessages: () => {
         const queue = this.pendingUserMessagesByKey.get(runKey)
         if (!queue || queue.length === 0) {
@@ -2199,11 +2230,10 @@ export class AgentService {
       messages: [...input.messages],
       compaction: this.normalizeCompaction(input.compaction, input.messages),
       pendingCompactionAnchorMessageId: null,
-      anchorMessageId: input.sourceUserMessageId ?? input.messages.at(-1)?.id,
+      anchorMessageId: historyMergeAnchorMessageId,
       activity,
     }
     this.recomputeConversationState(conversationId)
-    let runtimeStateSignature = createRuntimeStateSignature(runEntry.state)
 
     const unsubscribe = runtime.subscribe((snapshot) => {
       const currentRunEntry = this.runEntriesByKey.get(runKey)
@@ -2214,7 +2244,7 @@ export class AgentService {
       const mergedMessages = mergeVisibleMessages(
         previousRunState.messages,
         input.messages,
-        previousRunState.anchorMessageId,
+        historyMergeAnchorMessageId,
         snapshot.messages,
       )
       const nextRunState = {
@@ -2230,17 +2260,15 @@ export class AgentService {
             mergedMessages,
           ),
       }
-      const nextRuntimeStateSignature =
-        createRuntimeStateSignature(nextRunState)
       const publishMode = getRuntimeSnapshotPublishMode(
-        runtimeStateSignature,
-        nextRuntimeStateSignature,
+        previousRunState,
+        nextRunState,
       )
-      runtimeStateSignature = nextRuntimeStateSignature
       currentRunEntry.state = nextRunState
       this.recomputeConversationState(conversationId, publishMode)
     })
 
+    const backgroundExecutionReleasePromise = acquireBackgroundExecution()
     try {
       await runtime.run(runtimeInput)
 
@@ -2296,6 +2324,8 @@ export class AgentService {
         lastRunInput: input,
         lastLoopConfig: loopConfig,
       })
+      const releaseBackgroundExecution = await backgroundExecutionReleasePromise
+      releaseBackgroundExecution()
     }
   }
 
@@ -2501,7 +2531,6 @@ export class AgentService {
       runToken: null,
       lastRunInput: null,
       lastLoopConfig: null,
-      lastRunContext: null,
       state: {
         conversationId,
         status: 'idle',
@@ -2615,7 +2644,6 @@ export class AgentService {
         conversationEntry.pendingApprovalRecoveryContext = {
           lastRunInput: defaultBranchEntry.lastRunInput,
           lastLoopConfig: defaultBranchEntry.lastLoopConfig,
-          lastRunContext: defaultBranchEntry.lastRunContext,
         }
       }
       runEntries.forEach((entry) => {
@@ -2641,78 +2669,107 @@ export class AgentService {
     conversationId: string,
     persistReason: AgentReplaceConversationMessagesReason = 'mutation',
   ): void {
-    this.cancelScheduledConversationPublish(conversationId)
+    const state = this.publishConversationSnapshot(conversationId)
+    this.notifyRunSummarySubscribers()
+    this.schedulePersistence(state, persistReason)
+  }
+
+  // Renders the current state without touching disk. Every publish that reaches
+  // here is a semantic event: pure content/reasoning deltas are classified as
+  // `stream-only` (see `getRuntimeSnapshotPublishMode`) and never get this far,
+  // so neither vault writes nor run-summary notifications can be driven by frame
+  // cadence. The semantic event that follows a delta burst carries the same text,
+  // so nothing is lost by not publishing the deltas themselves.
+  private publishConversationSnapshot(
+    conversationId: string,
+  ): AgentConversationState {
     const entry = this.getOrCreateConversationEntry(conversationId)
+    // 发布事务的固定顺序：
+    //   权威状态（调用方已更新）
+    //   → 把最终 content / reasoning 写入 render stream
+    //   → 发布结构快照
+    //   → 定格相关 stream（无订阅者时回收）
+    // 定格必须排在结构快照之后：terminal 是"这条流之后不会再有值"的承诺，
+    // 在快照落地前发布就等于对订阅者宣告了一个尚未成立的终点。
+    const streamingMessageIds = this.syncAssistantRenderStreamValues(
+      entry.state,
+    )
     const state = this.cloneState(entry.state)
+    if (process.env.NODE_ENV !== 'production') {
+      deepFreezeForDev(state)
+    }
     for (const subscriber of entry.subscribers) {
       subscriber(state)
     }
     for (const subscriber of this.stateFeedSubscribers) {
       subscriber(state)
     }
-    this.schedulePersistence(state, persistReason)
-    this.notifyRunSummarySubscribers()
+    // 终态在这里统一收口：中断 / 完成 / error / 消息被替换或删除 / 分支切换
+    // 都会走到某一次结构发布，不需要各自调用。
+    this.assistantRenderStreams.markTerminalExcept(
+      conversationId,
+      streamingMessageIds,
+    )
+    return state
   }
 
   private publishConversationState(
     conversationId: string,
     publishMode: ConversationPublishMode,
   ): void {
-    if (publishMode === 'scheduled') {
-      this.scheduleConversationPublish(conversationId)
+    if (publishMode === 'stream-only') {
+      // 纯展示增量：权威状态已经更新，只把字节推给 render stream 的订阅者。
+      // 会话订阅者保留上一次结构折回值——那仍是一个合法、一致、可持久化的
+      // 历史切片，下一个语义事件会带着最新文本一起折回。这条路径按定义没有
+      // 消息离开 streaming，因此不涉及定格：终态只在结构发布里发生。
+      this.syncAssistantRenderStreamValues(
+        this.getOrCreateConversationEntry(conversationId).state,
+      )
       return
     }
     this.notifyConversationSubscribers(conversationId)
   }
 
-  private scheduleConversationPublish(conversationId: string): void {
-    if (this.pendingScheduledConversationPublishes.has(conversationId)) {
-      return
-    }
-
-    let rafId: number | null = null
-    const publish = () => {
-      const pending =
-        this.pendingScheduledConversationPublishes.get(conversationId)
-      if (!pending) {
-        return
+  /**
+   * 把每条 assistant 消息当前的 content / reasoning 写进 render stream，返回
+   * 仍在生成的消息 id（供随后的定格使用）。
+   *
+   * 已经收尾的消息同样要写：provider 的最终结果可能与最后一个 delta 不同
+   * （最终 reasoning 被规范化、正文被补全或重写），terminal 必须定格在最终值
+   * 而不是最后一个 delta。只写"流还没定格"的条目——历史消息与已回收的世代
+   * 不会因为一次结构发布被凭空拉起一条新流。
+   */
+  private syncAssistantRenderStreamValues(
+    state: AgentConversationState,
+  ): ReadonlySet<string> {
+    const streamingMessageIds = new Set<string>()
+    for (const message of state.messages) {
+      if (message.role !== 'assistant') {
+        continue
       }
-      if (
-        pending.rafId !== null &&
-        typeof globalThis.cancelAnimationFrame === 'function'
+      // 会话没在跑就不可能有活的流。这一条同时覆盖了"最后一条消息的
+      // generationState 没被终态化"的历史数据与异常收尾，避免条目泄漏。
+      const isStreaming =
+        state.status === 'running' &&
+        message.metadata?.generationState === 'streaming'
+      if (isStreaming) {
+        streamingMessageIds.add(message.id)
+      } else if (
+        !this.assistantRenderStreams.hasUnsettledStream(
+          state.conversationId,
+          message.id,
+        )
       ) {
-        globalThis.cancelAnimationFrame(pending.rafId)
+        continue
       }
-      clearTimeout(pending.timeoutId)
-      this.pendingScheduledConversationPublishes.delete(conversationId)
-      this.notifyConversationSubscribers(conversationId)
+      this.assistantRenderStreams.publish({
+        conversationId: state.conversationId,
+        messageId: message.id,
+        content: message.content,
+        reasoning: message.reasoning ?? '',
+      })
     }
-
-    if (typeof globalThis.requestAnimationFrame === 'function') {
-      rafId = globalThis.requestAnimationFrame(publish)
-    }
-    const timeoutId = setTimeout(publish, 16)
-
-    this.pendingScheduledConversationPublishes.set(conversationId, {
-      rafId,
-      timeoutId,
-    })
-  }
-
-  private cancelScheduledConversationPublish(conversationId: string): void {
-    const pending =
-      this.pendingScheduledConversationPublishes.get(conversationId)
-    if (!pending) {
-      return
-    }
-    if (
-      pending.rafId !== null &&
-      typeof globalThis.cancelAnimationFrame === 'function'
-    ) {
-      globalThis.cancelAnimationFrame(pending.rafId)
-    }
-    clearTimeout(pending.timeoutId)
-    this.pendingScheduledConversationPublishes.delete(conversationId)
+    return streamingMessageIds
   }
 
   private cancelPersistTimer(conversationId: string): void {
@@ -2737,6 +2794,31 @@ export class AgentService {
     await this.enqueueConversationPersistence(this.cloneState(entry.state))
   }
 
+  // Best-effort durability for the in-run coalescing window: on plugin unload
+  // (disable, update, vault switch, quit) every conversation that could be
+  // holding unwritten state commits it. That is any conversation with a
+  // pending write, plus any conversation with a live run — a long streaming
+  // answer raises no persistable event at all, so it has no pending timer to
+  // find. Conversations whose content already matches disk elide the write in
+  // `ChatManager.updateChat`. Callers cannot await this during a real process
+  // exit, so it is fire-and-forget by design.
+  flushAllConversationPersistence(): void {
+    const conversationIds = new Set([
+      ...this.persistTimers.keys(),
+      ...[...this.runEntriesByKey.values()].map(
+        (entry) => entry.conversationId,
+      ),
+    ])
+    for (const conversationId of conversationIds) {
+      void this.flushConversationPersistence(conversationId).catch((error) => {
+        console.error('[YOLO] Failed to flush agent conversation state', {
+          conversationId,
+          error,
+        })
+      })
+    }
+  }
+
   private enqueueConversationPersistence(
     state: AgentConversationState,
     touchUpdatedAt?: boolean,
@@ -2745,6 +2827,8 @@ export class AgentService {
     if (!persist) {
       return Promise.resolve()
     }
+
+    this.lastPersistedAt.set(state.conversationId, Date.now())
 
     const previous = this.persistenceChains.get(state.conversationId)
     const next = (previous ?? Promise.resolve()).then(
@@ -2774,12 +2858,16 @@ export class AgentService {
     return tracked
   }
 
+  // Shallow only: message objects are immutable once published (see the
+  // reference-identity contract at `getRuntimeSnapshotPublishMode`), so
+  // cloning them per publish would just destroy the identity that lets
+  // downstream state layers skip unchanged messages by reference.
   private cloneState(state: AgentConversationState): AgentConversationState {
     return {
       conversationId: state.conversationId,
       status: state.status,
       runId: state.runId,
-      messages: state.messages.map(cloneMessageForSnapshot),
+      messages: [...state.messages],
       compaction: [...(state.compaction ?? [])],
       pendingCompactionAnchorMessageId:
         state.pendingCompactionAnchorMessageId ?? null,
@@ -2797,6 +2885,30 @@ export class AgentService {
     for (const subscriber of this.summarySubscribers) {
       subscriber(summaries)
     }
+  }
+
+  // Commit points go to disk right away: any state outside a run — a settled
+  // run, the user's own message, an edited or deleted message, a rename — plus
+  // the first write of a conversation that has never been persisted. Only
+  // events raised while a run is in flight (tool requests, tool results,
+  // message boundaries) are coalesced to at most one write per
+  // `RUNNING_PERSIST_MIN_INTERVAL_MS`, so a tool-heavy run cannot rewrite the
+  // conversation file faster than a vault sync backend can upload it. The
+  // deadline is measured from the last write rather than the last event, so a
+  // busy run still lands a write every interval instead of starving behind a
+  // resetting debounce.
+  private getPersistenceDelayMs(state: AgentConversationState): number {
+    if (state.status !== 'running') {
+      return 0
+    }
+    const lastPersistedAt = this.lastPersistedAt.get(state.conversationId)
+    if (lastPersistedAt === undefined) {
+      return 0
+    }
+    return Math.max(
+      0,
+      RUNNING_PERSIST_MIN_INTERVAL_MS - (Date.now() - lastPersistedAt),
+    )
   }
 
   private schedulePersistence(
@@ -2820,12 +2932,7 @@ export class AgentService {
 
     this.cancelPersistTimer(state.conversationId)
 
-    const delayMs =
-      state.status === 'completed' ||
-      state.status === 'aborted' ||
-      state.status === 'error'
-        ? 0
-        : 250
+    const delayMs = this.getPersistenceDelayMs(state)
 
     // Self-heal writes (e.g. normalizing aborted streaming residue) must
     // persist the repaired payload but should not be treated as user activity

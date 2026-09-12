@@ -578,6 +578,60 @@ button.yolo-agent-mcp-config-copy {
   gap: var(--size-4-2);
 }
 
+/* server 名承载启用状态。此前整行统一是 text-muted，全开和全关长得一样——
+ * 一个 agent 能不能用某个 MCP，是这一页最该一眼看出来的事。有工具启用时它是
+ * 一个活动的分组标题（text-normal），全部禁用时退到 text-faint，两态之间是
+ * 两级对比而不是零级。 */
+.yolo-agent-tool-group-name {
+  color: var(--text-normal);
+}
+
+.yolo-agent-tool-group.is-disabled .yolo-agent-tool-group-name {
+  color: var(--text-faint);
+}
+
+/* 折叠触发器就是 server 名本身。它和同一行里的披露/审批下拉是兄弟节点而不是
+ * 祖先，整行不能做成一个按钮——那样会嵌套按钮。 */
+button.yolo-agent-tool-group-name--toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-2-1);
+  padding: 0;
+  height: auto;
+  line-height: inherit;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  font-size: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+button.yolo-agent-tool-group-name--toggle:hover {
+  background: transparent;
+  color: var(--text-accent);
+}
+
+.yolo-agent-tool-group-chevron {
+  flex: 0 0 auto;
+  opacity: 0.7;
+  transition: transform var(--yolo-anim-duration-feedback)
+    var(--yolo-anim-ease-out);
+}
+
+.yolo-agent-tool-group.is-expanded .yolo-agent-tool-group-chevron {
+  transform: rotate(90deg);
+}
+
+/* 全部禁用时，token 估算、披露模式、审批模式描述的都是不会运行的工具，一起
+ * 淡下去，免得这一行看起来仍然「已配置、在生效」。「全部启用」是恢复它的唯一
+ * 入口，保持原有对比度，不跟着淡。 */
+.yolo-agent-tool-group.is-disabled .yolo-agent-tool-group-tokens,
+.yolo-agent-tool-group.is-disabled .yolo-agent-tool-group-disclosure,
+.yolo-agent-tool-group.is-disabled .yolo-agent-tool-group-count {
+  opacity: 0.55;
+}
+
 .yolo-agent-tool-group-tokens {
   color: var(--text-faint);
   font-size: var(--font-ui-smaller);
@@ -812,6 +866,93 @@ button.yolo-agent-chip--more:hover {
   align-items: center;
 }
 
+.yolo-agent-model-context {
+  margin-top: var(--size-4-3);
+}
+
+.yolo-agent-model-request-parameters {
+  margin: var(--size-4-3) 0 var(--size-4-2);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-primary);
+  overflow: hidden;
+}
+
+.yolo-agent-model-request-parameters-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--size-4-2);
+  padding: var(--size-4-3);
+  cursor: pointer;
+  list-style: none;
+}
+
+.yolo-agent-model-request-parameters-summary::-webkit-details-marker {
+  display: none;
+}
+
+.yolo-agent-model-request-parameters-meta {
+  min-width: 0;
+}
+
+.yolo-agent-model-request-parameters-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-2);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-medium);
+}
+
+.yolo-agent-model-request-parameters-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  font-size: var(--font-ui-smaller);
+  line-height: 1;
+}
+
+.yolo-agent-model-request-parameters-desc {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.yolo-agent-model-request-parameters-chevron {
+  color: var(--text-muted);
+  transition: transform 140ms ease;
+}
+
+.yolo-agent-model-request-parameters[open]
+  .yolo-agent-model-request-parameters-chevron {
+  transform: rotate(180deg);
+}
+
+.yolo-agent-model-request-parameters-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2);
+  padding: var(--size-4-2);
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.yolo-agent-model-request-parameters-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.yolo-agent-model-request-parameters-content > .setting-item {
+  border-top: 0;
+}
+
 .yolo-agent-model-reset {
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-s);
@@ -969,7 +1110,9 @@ button.yolo-agent-chip--more:hover {
 
 .yolo-agent-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  /* auto-fill keeps empty tracks, so a lone "new" card stays one column
+     wide instead of stretching across the row (auto-fit would collapse). */
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: var(--size-4-3);
 }
 
@@ -977,11 +1120,7 @@ button.yolo-agent-chip--more:hover {
   position: relative;
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-m);
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--background-primary) 94%, transparent) 0%,
-    color-mix(in srgb, var(--background-secondary) 88%, transparent) 100%
-  );
+  background: var(--background-primary);
   padding: var(--size-4-3);
   min-height: 136px;
   transition:
@@ -1246,6 +1385,12 @@ button.yolo-agent-chip--more:hover {
   align-items: center;
   justify-content: center;
   color: var(--text-muted);
+}
+
+.yolo-agent-card-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--background-modifier-border);
 }
 
 .yolo-agent-card-menu-danger {
@@ -1653,263 +1798,11 @@ button.yolo-agent-chip--more:hover {
   line-height: 1.5;
 }
 
-.yolo-agent-workspace-group {
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-m);
-  overflow: hidden;
-  background: var(--background-primary);
-  transition: opacity 0.15s ease;
-}
-
-.yolo-agent-workspace-group.is-disabled {
-  opacity: 0.55;
-  pointer-events: none;
-}
-
-.yolo-agent-workspace-group--include {
-  border-color: color-mix(
-    in srgb,
-    var(--color-green) 35%,
-    var(--background-modifier-border)
-  );
-}
-
-.yolo-agent-workspace-group--exclude {
-  border-color: color-mix(
-    in srgb,
-    var(--color-red) 35%,
-    var(--background-modifier-border)
-  );
-}
-
-.yolo-agent-workspace-group-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  background: var(--background-secondary);
-  border-bottom: 1px solid var(--background-modifier-border);
-  flex-wrap: wrap;
-}
-
-.yolo-agent-workspace-group--include .yolo-agent-workspace-group-head {
-  background: color-mix(
-    in srgb,
-    var(--color-green) 8%,
-    var(--background-primary)
-  );
-  border-bottom-color: color-mix(
-    in srgb,
-    var(--color-green) 20%,
-    var(--background-modifier-border)
-  );
-}
-
-.yolo-agent-workspace-group--exclude .yolo-agent-workspace-group-head {
-  background: color-mix(
-    in srgb,
-    var(--color-red) 8%,
-    var(--background-primary)
-  );
-  border-bottom-color: color-mix(
-    in srgb,
-    var(--color-red) 20%,
-    var(--background-modifier-border)
-  );
-}
-
-.yolo-agent-workspace-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-smaller);
-  font-weight: var(--font-medium);
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: var(--background-primary);
-  border: 1px solid var(--background-modifier-border);
-  letter-spacing: 0.04em;
-}
-
-.yolo-agent-workspace-group--include .yolo-agent-workspace-badge {
-  color: var(--color-green);
-  border-color: color-mix(
-    in srgb,
-    var(--color-green) 30%,
-    var(--background-modifier-border)
-  );
-}
-
-.yolo-agent-workspace-group--exclude .yolo-agent-workspace-badge {
-  color: var(--color-red);
-  border-color: color-mix(
-    in srgb,
-    var(--color-red) 30%,
-    var(--background-modifier-border)
-  );
-}
-
-.yolo-agent-workspace-group-title {
-  font-size: var(--font-ui-small);
-  font-weight: var(--font-medium);
-  color: var(--text-normal);
-}
-
-.yolo-agent-workspace-group-desc {
-  flex: 1;
+.yolo-agent-workspace-footnote {
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
-  min-width: 120px;
-}
-
-.yolo-agent-workspace-add {
-  display: inline-flex !important;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px !important;
-  border-radius: var(--radius-s) !important;
-  background: var(--background-primary) !important;
-  background-color: var(--background-primary) !important;
-  border: 1px solid var(--background-modifier-border) !important;
-  box-shadow: none !important;
-  color: var(--text-normal);
-  font-size: var(--font-ui-smaller);
-  font-weight: var(--font-medium);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.yolo-agent-workspace-add:hover:not(:disabled) {
-  background: var(--background-modifier-hover) !important;
-  box-shadow: none !important;
-}
-
-.yolo-agent-workspace-add:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
-.yolo-agent-workspace-group--include .yolo-agent-workspace-add {
-  color: var(--color-green);
-  border-color: color-mix(
-    in srgb,
-    var(--color-green) 30%,
-    var(--background-modifier-border)
-  );
-}
-
-.yolo-agent-workspace-group--exclude .yolo-agent-workspace-add {
-  color: var(--color-red);
-  border-color: color-mix(
-    in srgb,
-    var(--color-red) 30%,
-    var(--background-modifier-border)
-  );
-}
-
-.yolo-agent-workspace-empty {
-  padding: 16px 14px;
-  text-align: center;
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-  font-family: var(--font-monospace);
-}
-
-.yolo-agent-workspace-rows {
-  display: flex;
-  flex-direction: column;
-}
-
-.yolo-agent-workspace-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 14px;
-  border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.yolo-agent-workspace-row:last-child {
-  border-bottom: none;
-}
-
-.yolo-agent-workspace-row-icon {
-  display: inline-flex;
-  width: 18px;
-  height: 18px;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  color: var(--text-muted);
-}
-
-.yolo-agent-workspace-group--include .yolo-agent-workspace-row-icon {
-  color: var(--color-green);
-}
-
-.yolo-agent-workspace-group--exclude .yolo-agent-workspace-row-icon {
-  color: var(--color-red);
-}
-
-.yolo-agent-workspace-row-path {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-small);
-  color: var(--text-normal);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.yolo-agent-workspace-row-kind {
-  font-family: var(--font-monospace);
-  font-size: 10px;
-  color: var(--text-muted);
-  padding: 2px 7px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 999px;
-  background: var(--background-primary);
-  flex: 0 0 auto;
-}
-
-.yolo-agent-workspace-row-remove {
-  display: inline-flex !important;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0 !important;
-  border-radius: var(--radius-s) !important;
-  background: transparent !important;
-  background-color: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  color: var(--text-muted);
-  cursor: pointer;
-  opacity: 0.4;
-  transition: all 0.15s ease;
-  flex: 0 0 auto;
-}
-
-.yolo-agent-workspace-row:hover .yolo-agent-workspace-row-remove {
-  opacity: 1;
-}
-
-.yolo-agent-workspace-row-remove:hover:not(:disabled) {
-  background: var(--background-modifier-hover) !important;
-  color: var(--color-red);
-}
-
-.yolo-agent-workspace-row-remove:disabled {
-  cursor: not-allowed;
-  opacity: 0.3;
-}
-
-.yolo-agent-workspace-row-remove svg {
-  display: block;
-  width: 14px;
-  height: 14px;
+  line-height: 1.5;
+  padding: 0 2px;
 }
 
 .yolo-js-exec-modal {

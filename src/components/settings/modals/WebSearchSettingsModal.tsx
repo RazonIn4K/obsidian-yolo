@@ -15,9 +15,8 @@ import {
   type WebSearchSettings,
   createDefaultProviderOptions,
 } from '../../../core/web-search'
-import YoloPlugin from '../../../main'
+import type YoloPlugin from '../../../main'
 import { ReactModal } from '../../common/ReactModal'
-import { ConfirmModal } from '../../modals/ConfirmModal'
 
 import {
   WebSearchProviderEditModal,
@@ -70,6 +69,8 @@ const PROVIDER_MONO: Record<WebSearchProviderType, string> = {
   'gemini-grounding': 'G',
   grok: 'X',
   zhipu: 'Z',
+  exa: 'E',
+  anysearch: 'A',
 }
 
 function Content({ app, plugin }: { app: App; plugin: YoloPlugin }) {
@@ -91,32 +92,20 @@ function Content({ app, plugin }: { app: App; plugin: YoloPlugin }) {
   }
 
   const handleDelete = (provider: WebSearchProviderOptions) => {
-    new ConfirmModal(app, {
-      title: t('settings.webSearch.deleteConfirmTitle', 'Delete provider'),
-      message: t(
-        'settings.webSearch.deleteConfirmMessage',
-        'Are you sure you want to delete this web search provider?',
-      ),
-      ctaText: t('common.delete', 'Delete'),
-      onConfirm: () => {
-        const remaining = webSearch.providers.filter(
-          (p) => p.id !== provider.id,
-        )
-        const nextDefault =
-          webSearch.defaultProviderId === provider.id
-            ? remaining[0]?.id
-            : webSearch.defaultProviderId
-        void updateWebSearch({
-          providers: remaining,
-          defaultProviderId: nextDefault,
-        }).catch((err) => {
-          console.error('Failed to delete web search provider', err)
-          new Notice(
-            t('settings.webSearch.deleteFailed', 'Failed to delete provider.'),
-          )
-        })
-      },
-    }).open()
+    const remaining = webSearch.providers.filter((p) => p.id !== provider.id)
+    const nextDefault =
+      webSearch.defaultProviderId === provider.id
+        ? remaining[0]?.id
+        : webSearch.defaultProviderId
+    void updateWebSearch({
+      providers: remaining,
+      defaultProviderId: nextDefault,
+    }).catch((err) => {
+      console.error('Failed to delete web search provider', err)
+      new Notice(
+        t('settings.webSearch.deleteFailed', 'Failed to delete provider.'),
+      )
+    })
   }
 
   const handleSetDefault = (id: string) => {
@@ -396,5 +385,9 @@ function defaultTypeLabel(type: WebSearchProviderType): string {
       return 'Grok'
     case 'zhipu':
       return 'Zhipu Web Search'
+    case 'exa':
+      return 'Exa'
+    case 'anysearch':
+      return 'AnySearch'
   }
 }

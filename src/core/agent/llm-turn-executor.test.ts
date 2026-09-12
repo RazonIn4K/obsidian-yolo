@@ -8,6 +8,7 @@ import {
 import {
   LLMResponseNonStreaming,
   LLMResponseStreaming,
+  ProviderExecutedToolCall,
 } from '../../types/llm/response'
 import { LLMProvider } from '../../types/provider.types'
 import {
@@ -84,12 +85,140 @@ const createMockMcpManager = (tools: unknown[] = []): McpManager =>
   ({
     listAvailableTools: jest.fn().mockResolvedValue(tools),
     getJsSandboxSettings: jest.fn(() => ({})),
-    getSettingsSnapshot: jest.fn(() => ({})),
+    getSettingsSnapshot: jest.fn(() => ({
+      mcp: { servers: [], discoveredCatalogs: {} },
+    })),
   }) as unknown as McpManager
 
 describe('AgentLlmTurnExecutor', () => {
   beforeEach(() => {
     mockExecuteSingleTurn.mockReset()
+  })
+
+  describe('provider tool runs', () => {
+    const chunkWith = (
+      delta: LLMResponseStreaming['choices'][number]['delta'],
+    ): LLMResponseStreaming => ({
+      id: 'chunk',
+      model: 'gpt-4.1',
+      object: 'chat.completion.chunk',
+      choices: [{ finish_reason: null, delta }],
+    })
+
+    const run = (
+      id: string,
+      status: 'running' | 'success',
+    ): ProviderExecutedToolCall[] => [{ id, name: 'Bash', status }]
+
+    const runExecutor = async (
+      stream: (
+        emit: (delta: LLMResponseStreaming['choices'][number]['delta']) => void,
+      ) => void,
+      turnContent: string,
+    ) => {
+      const log: string[] = []
+      mockExecuteSingleTurn.mockImplementation(async (input) => {
+        stream((delta) => {
+          void input.onStreamDelta?.({
+            contentDelta: delta.content ?? '',
+            reasoningDelta: '',
+            chunk: chunkWith(delta),
+          })
+        })
+        return {
+          content: turnContent,
+          reasoning: undefined,
+          annotations: undefined,
+          usage: undefined,
+          providerMetadata: undefined,
+          toolCalls: [],
+        }
+      })
+
+      const result = await new AgentLlmTurnExecutor({
+        providerClient: new MockProvider(),
+        model: TEST_MODEL,
+        requestContextBuilder: {
+          generateRequestMessages: jest
+            .fn()
+            .mockResolvedValue([{ role: 'user', content: 'hello' }]),
+        } as unknown as RequestContextBuilder,
+        mcpManager: createMockMcpManager(),
+        conversationId: 'conv-1',
+        messages: [],
+        enableTools: false,
+        includeBuiltinTools: false,
+        onAssistantMessage: (message) => {
+          log.push(
+            `assistant:${message.id}:${message.content}:${message.metadata?.generationState}`,
+          )
+        },
+        onProviderToolRun: (calls) => {
+          log.push(`run:${calls[0].id}:${calls[0].status}`)
+        },
+      }).run()
+
+      return { log, result }
+    }
+
+    it('seals the answer before the run and continues after it', async () => {
+      const { log, result } = await runExecutor((emit) => {
+        emit({ content: 'before' })
+        emit({ providerToolRun: run('t1', 'running') })
+        emit({ providerToolRun: run('t1', 'success') })
+        emit({ content: 'after' })
+      }, 'beforeafter')
+
+      // The run has to land between the two halves of the answer: the first
+      // message is finished before it, the second opens after it.
+      expect(log).toEqual(
+        [
+          'assistant:$id::streaming',
+          'assistant:$id:before:streaming',
+          // Every chunk republishes the open message, changed or not; the
+          // run-bearing chunk is no exception, and the seal follows it.
+          'assistant:$id:before:streaming',
+          'assistant:$id:before:completed',
+          'run:t1:running',
+          'assistant:$id#1::streaming',
+          'assistant:$id#1::streaming',
+          'run:t1:success',
+          'assistant:$id#1:after:streaming',
+          'assistant:$id#1:after:completed',
+        ].map((entry) =>
+          entry.replace('$id', result.assistantMessage.id.split('#')[0]),
+        ),
+      )
+    })
+
+    it('does not split again while the same run is still reporting', async () => {
+      const { log } = await runExecutor((emit) => {
+        emit({ providerToolRun: run('t1', 'running') })
+        emit({ providerToolRun: run('t1', 'success') })
+        emit({ providerToolRun: run('t2', 'running') })
+      }, '')
+
+      const openedMessages = new Set(
+        log
+          .filter((entry) => entry.startsWith('assistant:'))
+          .map((entry) => entry.split(':')[1]),
+      )
+      expect(openedMessages.size).toBe(3)
+      expect(log.filter((entry) => entry.startsWith('run:'))).toHaveLength(3)
+    })
+
+    it('does not replay the turn into a message opened after the last run', async () => {
+      // The trailing message is empty because the turn ended on a tool run,
+      // not because no delta ever arrived — the non-streaming fallback must
+      // not treat it as the latter and paste the whole answer back in.
+      const { result } = await runExecutor((emit) => {
+        emit({ content: 'all of the answer' })
+        emit({ providerToolRun: run('t1', 'success') })
+      }, 'all of the answer')
+
+      expect(result.assistantMessage.content).toBe('')
+      expect(result.hasAssistantOutput).toBe(true)
+    })
   })
 
   it('passes primary timeout and recovery settings to single turn execution', async () => {
@@ -131,11 +260,12 @@ describe('AgentLlmTurnExecutor', () => {
 
     await executor.run()
 
+    // No `runtimeMode` given, so the run defaults to Agent and carries Agent's
+    // routing text. It no longer varies with the tool list — `enableTools:
+    // false` above used to turn this into a three-item gap report.
     expect(generateRequestMessages).toHaveBeenCalledWith(
       expect.objectContaining({
-        runtimeModePrompt: expect.stringContaining(
-          'file editing, path operations, and terminal commands',
-        ),
+        runtimeModePrompt: expect.stringContaining('You are in Agent mode'),
       }),
     )
     expect(mockExecuteSingleTurn).toHaveBeenCalledWith(
@@ -144,6 +274,78 @@ describe('AgentLlmTurnExecutor', () => {
         streamFallbackRecoveryEnabled: false,
       }),
     )
+  })
+
+  it('publishes the streaming placeholder before preparing the request', async () => {
+    const observed: ChatAssistantMessage[] = []
+    const requestContextBuilder = {
+      generateRequestMessages: jest.fn(async () => {
+        expect(observed).toHaveLength(1)
+        expect(observed[0].metadata?.generationState).toBe('streaming')
+        return [{ role: 'user' as const, content: 'hello' }]
+      }),
+    } as unknown as RequestContextBuilder
+    mockExecuteSingleTurn.mockResolvedValue({
+      content: 'done',
+      reasoning: undefined,
+      annotations: undefined,
+      usage: undefined,
+      providerMetadata: undefined,
+      toolCalls: [],
+    })
+
+    await new AgentLlmTurnExecutor({
+      providerClient: new MockProvider(),
+      model: TEST_MODEL,
+      requestContextBuilder,
+      mcpManager: createMockMcpManager(),
+      conversationId: 'conv-1',
+      messages: [],
+      enableTools: false,
+      includeBuiltinTools: false,
+      onAssistantMessage: (message) => {
+        observed.push({
+          ...message,
+          metadata: message.metadata ? { ...message.metadata } : undefined,
+        })
+      },
+    }).run()
+
+    expect(observed.at(-1)?.metadata?.generationState).toBe('completed')
+  })
+
+  it('moves preparation failures onto the visible assistant placeholder', async () => {
+    const observed: ChatAssistantMessage[] = []
+    const requestContextBuilder = {
+      generateRequestMessages: jest
+        .fn()
+        .mockRejectedValue(new Error('attachment unavailable')),
+    } as unknown as RequestContextBuilder
+
+    await expect(
+      new AgentLlmTurnExecutor({
+        providerClient: new MockProvider(),
+        model: TEST_MODEL,
+        requestContextBuilder,
+        mcpManager: createMockMcpManager(),
+        conversationId: 'conv-1',
+        messages: [],
+        enableTools: false,
+        includeBuiltinTools: false,
+        onAssistantMessage: (message) => {
+          observed.push({
+            ...message,
+            metadata: message.metadata ? { ...message.metadata } : undefined,
+          })
+        },
+      }).run(),
+    ).rejects.toThrow('attachment unavailable')
+
+    expect(observed.at(-1)?.metadata).toMatchObject({
+      generationState: 'error',
+      errorMessage: 'attachment unavailable',
+    })
+    expect(mockExecuteSingleTurn).not.toHaveBeenCalled()
   })
 
   it('keeps streaming arguments for local write tool previews', async () => {
@@ -166,7 +368,7 @@ describe('AgentLlmTurnExecutor', () => {
                     id: 'tool-1',
                     type: 'function',
                     function: {
-                      name: 'fs_move',
+                      name: 'fs_write',
                       arguments: '{"oldPath":"a.md","newPath":"b.md"}',
                     },
                   },
@@ -181,7 +383,7 @@ describe('AgentLlmTurnExecutor', () => {
             id: 'tool-1',
             type: 'function',
             function: {
-              name: 'fs_move',
+              name: 'fs_write',
               arguments: createPartialToolCallArguments(
                 '{"oldPath":"a.md","newPath":"b.md"}',
               ),
@@ -198,7 +400,7 @@ describe('AgentLlmTurnExecutor', () => {
         toolCalls: [
           {
             id: 'tool-1',
-            name: 'fs_move',
+            name: 'fs_write',
             arguments: createCompleteToolCallArguments({
               value: { oldPath: 'a.md', newPath: 'b.md' },
               rawText: '{"oldPath":"a.md","newPath":"b.md"}',
@@ -217,8 +419,8 @@ describe('AgentLlmTurnExecutor', () => {
 
     const mcpManager = createMockMcpManager([
       {
-        name: 'yolo_local__fs_move',
-        description: 'Move path',
+        name: 'yolo_local__fs_write',
+        description: 'Write file',
         inputSchema: {
           type: 'object',
           properties: {},
@@ -264,7 +466,7 @@ describe('AgentLlmTurnExecutor', () => {
 
     expect(streamingPreview?.toolCallRequests?.[0]).toEqual({
       id: 'tool-1',
-      name: 'yolo_local__fs_move',
+      name: 'yolo_local__fs_write',
       arguments: createPartialToolCallArguments(
         '{"oldPath":"a.md","newPath":"b.md"}',
       ),
@@ -273,7 +475,7 @@ describe('AgentLlmTurnExecutor', () => {
 
     expect(result.toolCallRequests[0]).toEqual({
       id: 'tool-1',
-      name: 'yolo_local__fs_move',
+      name: 'yolo_local__fs_write',
       arguments: createCompleteToolCallArguments({
         value: { oldPath: 'a.md', newPath: 'b.md' },
         rawText: '{"oldPath":"a.md","newPath":"b.md"}',
@@ -650,115 +852,5 @@ describe('AgentLlmTurnExecutor', () => {
     expect(result.assistantMessage.content).toBe('')
     expect(result.toolCallRequests).toEqual([])
     expect(result.hasAssistantOutput).toBe(false)
-  })
-
-  it('passes hasMemoryTools when memory tools are available', async () => {
-    const provider = new MockProvider()
-    const requestContextBuilder = {
-      generateRequestMessages: jest
-        .fn()
-        .mockResolvedValue([{ role: 'user', content: 'hello' }]),
-    } as unknown as RequestContextBuilder
-
-    const mcpManager = createMockMcpManager([
-      {
-        name: 'yolo_local__memory_add',
-        description: 'Add memory',
-        inputSchema: {
-          type: 'object',
-          properties: {},
-        },
-      },
-    ])
-
-    mockExecuteSingleTurn.mockResolvedValue({
-      content: 'done',
-      reasoning: '',
-      annotations: undefined,
-      usage: undefined,
-      toolCalls: [],
-    })
-
-    const executor = new AgentLlmTurnExecutor({
-      providerClient: provider,
-      model: TEST_MODEL,
-      requestContextBuilder,
-      mcpManager,
-      conversationId: 'conv-1',
-      messages: [],
-      enableTools: true,
-      includeBuiltinTools: true,
-      requestParams: {
-        deliveryMode: 'buffered',
-      },
-      onAssistantMessage: () => {},
-    })
-
-    await executor.run()
-
-    const generateRequestMessagesMock =
-      // eslint-disable-next-line @typescript-eslint/unbound-method -- Jest mock function accessed for assertion
-      requestContextBuilder.generateRequestMessages
-    expect(generateRequestMessagesMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        hasTools: true,
-        hasMemoryTools: true,
-      }),
-    )
-  })
-
-  it('does not pass hasMemoryTools for non-memory tools', async () => {
-    const provider = new MockProvider()
-    const requestContextBuilder = {
-      generateRequestMessages: jest
-        .fn()
-        .mockResolvedValue([{ role: 'user', content: 'hello' }]),
-    } as unknown as RequestContextBuilder
-
-    const mcpManager = createMockMcpManager([
-      {
-        name: 'yolo_local__fs_read',
-        description: 'Read file',
-        inputSchema: {
-          type: 'object',
-          properties: {},
-        },
-      },
-    ])
-
-    mockExecuteSingleTurn.mockResolvedValue({
-      content: 'done',
-      reasoning: '',
-      annotations: undefined,
-      usage: undefined,
-      toolCalls: [],
-    })
-
-    const executor = new AgentLlmTurnExecutor({
-      providerClient: provider,
-      model: TEST_MODEL,
-      requestContextBuilder,
-      mcpManager,
-      conversationId: 'conv-1',
-      messages: [],
-      enableTools: true,
-      includeBuiltinTools: true,
-      requestParams: {
-        deliveryMode: 'buffered',
-      },
-      onAssistantMessage: () => {},
-    })
-
-    await executor.run()
-
-    const generateRequestMessagesMock =
-      // eslint-disable-next-line @typescript-eslint/unbound-method -- Jest mock function accessed for assertion
-      requestContextBuilder.generateRequestMessages
-    expect(generateRequestMessagesMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        hasTools: true,
-        hasMemoryTools: false,
-      }),
-    )
   })
 })

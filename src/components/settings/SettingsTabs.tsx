@@ -5,16 +5,18 @@ import React, {
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react'
 
 import { useLanguage } from '../../contexts/language-context'
-import YoloPlugin from '../../main'
+import type YoloPlugin from '../../main'
+import { SETTINGS_ACTIVE_TAB_STORAGE_KEY } from '../../utils/openPluginSettingsTab'
 
 import { AgentTab } from './tabs/AgentTab'
 import { EditorTab } from './tabs/EditorTab'
 import { KnowledgeTab } from './tabs/KnowledgeTab'
-import { LearningTab } from './tabs/LearningTab'
 import { ModelsTab } from './tabs/ModelsTab'
+import { ModulesTab } from './tabs/ModulesTab'
 import { OthersTab } from './tabs/OthersTab'
 
 type SettingsTabsProps = {
@@ -26,14 +28,14 @@ export type SettingsTabId =
   | 'models'
   | 'editor'
   | 'knowledge'
-  | 'learning'
+  | 'modules'
   | 'agent'
   | 'others'
 
 type SettingsTab = {
   id: SettingsTabId
   labelKey: string
-  component: FC<SettingsTabsProps>
+  component?: FC<SettingsTabsProps>
 }
 
 const SETTINGS_TABS: SettingsTab[] = [
@@ -58,9 +60,8 @@ const SETTINGS_TABS: SettingsTab[] = [
     component: KnowledgeTab,
   },
   {
-    id: 'learning',
-    labelKey: 'settings.tabs.learning',
-    component: LearningTab,
+    id: 'modules',
+    labelKey: 'settings.tabs.modules',
   },
   {
     id: 'others',
@@ -69,7 +70,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   },
 ]
 
-const STORAGE_KEY = 'yolo_settings_active_tab'
+const STORAGE_KEY = SETTINGS_ACTIVE_TAB_STORAGE_KEY
 
 export function SettingsTabs({ app, plugin }: SettingsTabsProps) {
   const { t } = useLanguage()
@@ -87,7 +88,16 @@ export function SettingsTabs({ app, plugin }: SettingsTabsProps) {
     }
     return 'models'
   })
-
+  // 内容入场方向：与 glider 的滑动方向一致，让内容读起来是「跟着指示器走」。
+  const [enterDirection, setEnterDirection] = useState<'forward' | 'backward'>(
+    'forward',
+  )
+  const registry = plugin.getModuleSettingsContributionRegistry()
+  const moduleSettings = useSyncExternalStore(
+    registry.subscribe,
+    registry.getSnapshot,
+    registry.getSnapshot,
+  )
   useEffect(() => {
     // Save to localStorage when tab changes
     void app.saveLocalStorage(STORAGE_KEY, activeTab)
@@ -99,7 +109,22 @@ export function SettingsTabs({ app, plugin }: SettingsTabsProps) {
   const activeTabIndex = SETTINGS_TABS.findIndex((tab) => tab.id === activeTab)
   const activeTabIndexRef = useRef(activeTabIndex)
   const navRef = useRef<HTMLDivElement | null>(null)
+  const contentRef = useRef<HTMLDivElement | null>(null)
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
+
+  const selectTab = (tabId: SettingsTabId, index: number) => {
+    if (tabId === activeTab) {
+      return
+    }
+    setEnterDirection(index > activeTabIndex ? 'forward' : 'backward')
+    setActiveTab(tabId)
+  }
+
+  useLayoutEffect(() => {
+    // 换 tab 等于换了一份内容，滚动位置必须回到顶部；否则新内容会从上一个
+    // tab 停留的偏移处开始显示，比缺少动效更割裂。
+    contentRef.current?.scrollTo({ top: 0 })
+  }, [activeTab])
 
   const updateGlider = () => {
     const nav = navRef.current
@@ -174,7 +199,7 @@ export function SettingsTabs({ app, plugin }: SettingsTabsProps) {
             className={`yolo-settings-tab-button ${
               activeTab === tab.id ? 'is-active' : ''
             }`}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => selectTab(tab.id, index)}
             role="tab"
             aria-selected={activeTab === tab.id}
             ref={(element) => {
@@ -185,8 +210,23 @@ export function SettingsTabs({ app, plugin }: SettingsTabsProps) {
           </button>
         ))}
       </div>
-      <div className="yolo-settings-tabs-content">
-        <ActiveComponent app={app} plugin={plugin} />
+      <div className="yolo-settings-tabs-content" ref={contentRef}>
+        {/* key 让每次换 tab 重新挂载容器，入场动画得以重放。 */}
+        <div
+          key={activeTab}
+          className="yolo-settings-tabs-body"
+          data-enter-direction={enterDirection}
+        >
+          {activeTab === 'modules' ? (
+            <ModulesTab
+              service={plugin.getModuleService()}
+              runtimeComponents={plugin.getRuntimeComponentService()}
+              registrations={moduleSettings}
+            />
+          ) : (
+            <ActiveComponent app={app} plugin={plugin} />
+          )}
+        </div>
       </div>
     </div>
   )

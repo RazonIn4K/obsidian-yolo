@@ -9,8 +9,18 @@ jest.mock('clsx', () => ({
   default: (...args: unknown[]) => args.filter(Boolean).join(' '),
 }))
 
-jest.mock('../../contexts/plugin-context', () => ({
-  usePlugin: () => ({}),
+jest.mock('./chat-runtime-actions-context', () => ({
+  useChatRuntimeActions: (conversationId = 'conversation-1') => ({
+    actions: {
+      cancelRun: jest.fn(async () => undefined),
+      approveTool: jest.fn(async () => ({ kind: 'handled' })),
+      rejectTool: jest.fn(async () => ({ kind: 'handled' })),
+      abortTool: jest.fn(async () => ({ kind: 'handled' })),
+      answerQuestion: jest.fn(async () => ({ kind: 'handled' })),
+      cancelQuestion: jest.fn(async () => ({ kind: 'handled' })),
+    },
+    conversation: { runtimeId: 'yolo', conversationId },
+  }),
 }))
 
 const mockedObsidianCodeBlock = jest.fn((_: unknown) => null)
@@ -26,6 +36,9 @@ jest.mock('./tool-cards/LiveTaskCard', () => ({
 const mockedSubagentCard = jest.fn((_: unknown) => null)
 jest.mock('./tool-cards/SubagentCard', () => ({
   SubagentCard: (props: unknown) => mockedSubagentCard(props),
+}))
+jest.mock('./tool-cards/CliSubagentCard', () => ({
+  CliSubagentCard: () => null,
 }))
 
 import * as React from 'react'
@@ -43,7 +56,10 @@ import type { ToolLabels } from './ToolMessage'
 import ToolMessage, {
   areToolCallItemPropsEqual,
   getHeadlineDisplayInfo,
+  getToolDisplayInfo,
   getToolResultDisplayText,
+  getToolSuccessIconKind,
+  isAlwaysAllowDisabledForRequest,
 } from './ToolMessage'
 
 describe('ToolMessage rendering', () => {
@@ -51,6 +67,61 @@ describe('ToolMessage rendering', () => {
     mockedObsidianCodeBlock.mockClear()
     mockedLiveTaskCard.mockClear()
     mockedSubagentCard.mockClear()
+  })
+
+  it('renders CLI namespaces from structured identity without parsing names', () => {
+    expect(
+      getToolDisplayInfo({
+        name: 'list_mcp_resources',
+        metadata: {
+          cliToolCall: {
+            runtimeId: 'codex',
+            eventType: 'mcpToolCall',
+            namespace: 'codex',
+            name: 'list_mcp_resources',
+          },
+        },
+      }),
+    ).toEqual({ displayName: 'codex:list_mcp_resources' })
+  })
+
+  it('shows the real tool name while an invoke_tool call is still streaming', () => {
+    // Executed calls reach the UI already unwrapped by the gateway; the
+    // in-flight preview is the one place the envelope is still visible.
+    expect(
+      getToolDisplayInfo({
+        name: 'yolo_local__invoke_tool',
+        arguments: createCompleteToolCallArguments({
+          value: {
+            tool_name: 'server__do_thing',
+            arguments: { value: 'x' },
+          },
+        }),
+      }).displayName,
+    ).toBe('server:do_thing')
+  })
+
+  it('resolves the Gemini JSON-string arguments form too', () => {
+    expect(
+      getToolDisplayInfo({
+        name: 'yolo_local__invoke_tool',
+        arguments: createCompleteToolCallArguments({
+          value: {
+            tool_name: 'yolo_local__terminal_command',
+            arguments: '{"command":"ls -la"}',
+          },
+        }),
+      }).summaryText,
+    ).toContain('ls')
+  })
+
+  it('falls back to the wrapper until the streamed arguments name a tool', () => {
+    expect(
+      getToolDisplayInfo({
+        name: 'yolo_local__invoke_tool',
+        arguments: createCompleteToolCallArguments({ value: {} }),
+      }).displayName,
+    ).toBeTruthy()
   })
 
   it('hydrates original terminal_command card from persisted result output', () => {
@@ -147,6 +218,43 @@ describe('ToolMessage rendering', () => {
     expect(mockedSubagentCard).not.toHaveBeenCalled()
     expect(markup).toContain('Allow')
     expect(markup).toContain('Reject')
+    // Baseline: this tool call has no persisted approvalPolicy, so the
+    // split "allow for this chat" dropdown renders normally.
+    expect(markup).toContain('yolo-split-button')
+  })
+
+  it('hides the "allow for this chat" dropdown for a persisted always-require-user approval policy', () => {
+    const markup = renderToStaticMarkup(
+      React.createElement(ToolMessage, {
+        message: {
+          role: 'tool',
+          id: 'tool-message-1',
+          toolCalls: [
+            {
+              request: {
+                id: 'tool-1',
+                name: 'module-mode-learning-chat__start_course_generation',
+                arguments: createCompleteToolCallArguments({ value: {} }),
+                metadata: { approvalPolicy: 'always-require-user' },
+              },
+              response: {
+                status: ToolCallResponseStatus.PendingApproval,
+              },
+            },
+          ],
+        },
+        conversationId: 'conversation-1',
+        onMessageUpdate: () => {},
+      }),
+    )
+
+    expect(markup).toContain('Allow')
+    expect(markup).toContain('Reject')
+    // The SplitButton (and its "allow for this chat" menu option) must not
+    // render at all — approvalPolicy: 'always-require-user' degrades it to
+    // a single plain "Allow" button. See `AgentSessionService.approveToolCall`'s
+    // matching server-side rejection of allowForConversation for this call.
+    expect(markup).not.toContain('yolo-split-button')
   })
 
   it('does not render hidden parameters or result content while collapsed', () => {
@@ -163,7 +271,7 @@ describe('ToolMessage rendering', () => {
                 arguments: createCompleteToolCallArguments({
                   value: {
                     paths: ['docs/large.md'],
-                    operation: { type: 'lines', startLine: 1 },
+                    startLine: 1,
                     padding: 'x'.repeat(100_000),
                   },
                 }),
@@ -282,6 +390,82 @@ describe('ToolMessage rendering', () => {
   })
 })
 
+describe('ToolMessage success icon helpers', () => {
+  it('uses a wrench for successful skill reads', () => {
+    expect(
+      getToolSuccessIconKind({
+        request: {
+          name: 'yolo_local__fs_read',
+        },
+        response: {
+          status: ToolCallResponseStatus.Success,
+          data: {
+            type: 'text',
+            text: '',
+            metadata: {
+              fsReadOperation: {
+                type: 'full',
+                isPdf: false,
+                skillNames: ['obsidian-output-format'],
+              },
+            },
+          },
+        },
+      }),
+    ).toBe('skill')
+  })
+
+  it('keeps the success check for ordinary file reads', () => {
+    expect(
+      getToolSuccessIconKind({
+        request: {
+          name: 'yolo_local__fs_read',
+        },
+        response: {
+          status: ToolCallResponseStatus.Success,
+          data: {
+            type: 'text',
+            text: '',
+            metadata: {
+              fsReadOperation: { type: 'full', isPdf: false },
+            },
+          },
+        },
+      }),
+    ).toBe('default')
+  })
+
+  it('uses a terminal icon for terminal commands', () => {
+    expect(
+      getToolSuccessIconKind({
+        request: {
+          name: 'yolo_local__terminal_command',
+        },
+      }),
+    ).toBe('terminal')
+  })
+
+  it('keeps the success check for other builtin tools', () => {
+    expect(
+      getToolSuccessIconKind({
+        request: {
+          name: 'yolo_local__fs_search',
+        },
+      }),
+    ).toBe('default')
+  })
+
+  it('keeps the success check for non-builtin tools', () => {
+    expect(
+      getToolSuccessIconKind({
+        request: {
+          name: 'custom_server__fs_search',
+        },
+      }),
+    ).toBe('default')
+  })
+})
+
 describe('getToolResultDisplayText', () => {
   it('returns text unchanged when it fits within the display budget', () => {
     const text = 'small fs_read output'
@@ -330,6 +514,7 @@ describe('ToolMessage headline helpers', () => {
       fs_create_dir: 'Create folder',
       fs_move: 'Move path',
       terminal_command: 'Terminal command',
+      open_skill: 'Open skill',
     },
     writeActionLabels: {
       write: 'Write file',
@@ -354,6 +539,9 @@ describe('ToolMessage headline helpers', () => {
     reject: 'Reject',
     abort: 'Abort',
     allowForThisChat: 'Allow for this chat',
+    outsideVaultNotice: (path: string) => `Outside the vault: ${path}`,
+    approvePlan: 'Approve plan',
+    stayInPlan: 'Stay in plan',
     todoWriteCleared: 'Cleared list',
     todoWriteAllCompleted: (count: number) => `All completed (${count})`,
     todoWriteCreated: (count: number) => `Planned ${count} tasks`,
@@ -444,9 +632,6 @@ describe('ToolMessage headline helpers', () => {
           arguments: createCompleteToolCallArguments({
             value: {
               paths: ['docs/plan.md'],
-              operation: {
-                type: 'full',
-              },
             },
           }),
         },
@@ -468,6 +653,39 @@ describe('ToolMessage headline helpers', () => {
     ).toBe('docs/plan.md | 全文')
   })
 
+  it('uses the skill name instead of the file-read transport for skill loads', () => {
+    expect(
+      getHeadlineDisplayInfo({
+        request: {
+          name: 'yolo_local__fs_read',
+          arguments: createCompleteToolCallArguments({
+            value: {
+              paths: ['YOLO/skills/release/SKILL.md'],
+            },
+          }),
+        },
+        response: {
+          status: ToolCallResponseStatus.Success,
+          data: {
+            type: 'text',
+            text: '',
+            metadata: {
+              fsReadOperation: {
+                type: 'full',
+                isPdf: false,
+                skillNames: ['release'],
+              },
+            },
+          },
+        },
+        labels,
+      }),
+    ).toEqual({
+      displayName: 'Open skill',
+      summaryText: 'release',
+    })
+  })
+
   it('shows concrete paths for multi-path fs_read headlines', () => {
     expect(
       getHeadlineDisplayInfo({
@@ -476,7 +694,6 @@ describe('ToolMessage headline helpers', () => {
           arguments: createCompleteToolCallArguments({
             value: {
               paths: ['docs/one.md', 'docs/two.md'],
-              operation: { type: 'full' },
             },
           }),
         },
@@ -509,7 +726,6 @@ describe('ToolMessage headline helpers', () => {
                 'docs/four.md',
                 'docs/five.md',
               ],
-              operation: { type: 'full' },
             },
           }),
         },
@@ -536,10 +752,7 @@ describe('ToolMessage headline helpers', () => {
           arguments: createCompleteToolCallArguments({
             value: {
               paths: ['docs/plan.md'],
-              operation: {
-                type: 'lines',
-                startLine: 12,
-              },
+              startLine: 12,
             },
           }),
         },
@@ -584,10 +797,7 @@ describe('ToolMessage headline helpers', () => {
           arguments: createCompleteToolCallArguments({
             value: {
               paths: ['docs/paper.pdf'],
-              operation: {
-                type: 'lines',
-                startLine: 1,
-              },
+              startLine: 1,
             },
           }),
         },
@@ -634,7 +844,7 @@ describe('ToolMessage headline helpers', () => {
           arguments: createCompleteToolCallArguments({
             value: {
               paths: ['docs/large.md'],
-              operation: { type: 'lines', startLine: 1 },
+              startLine: 1,
             },
           }),
         },
@@ -670,7 +880,7 @@ describe('ToolMessage headline helpers', () => {
           arguments: createCompleteToolCallArguments({
             value: {
               paths: ['docs/plan.md'],
-              operation: { type: 'lines', startLine: 12 },
+              startLine: 12,
             },
           }),
         },
@@ -699,7 +909,16 @@ describe('ToolMessage headline helpers', () => {
     })
   })
 
-  it('uses file path as summary for delete headlines', () => {
+  // fs_delete/fs_create_dir/fs_move retired with the virtual bash tool
+  // (master.md decision 10, schema v79). D8/D10 deliberately drop their
+  // `getLocalToolSummaryText` branches along with the rest of the retired
+  // `if` chain: retired tool names no longer get a special-cased summary,
+  // only whatever `displayName` this test's own `labels` fixture still
+  // happens to carry (a real `getToolLabels()` call — unlike this hand-built
+  // fixture — no longer carries one either, so real historical conversations
+  // show the bare tool name; see D10's checklist for `ToolMessage.tsx`'s
+  // `displayNames` map).
+  it('has no summary for retired delete headlines (only whatever displayName this fixture supplies)', () => {
     expect(
       getHeadlineDisplayInfo({
         request: {
@@ -714,11 +933,10 @@ describe('ToolMessage headline helpers', () => {
       }),
     ).toEqual({
       displayName: 'Delete',
-      summaryText: 'docs/old-note.md',
     })
   })
 
-  it('uses folder path as summary for create-dir headlines', () => {
+  it('has no summary for retired create-dir headlines (only whatever displayName this fixture supplies)', () => {
     expect(
       getHeadlineDisplayInfo({
         request: {
@@ -733,11 +951,10 @@ describe('ToolMessage headline helpers', () => {
       }),
     ).toEqual({
       displayName: 'Create folder',
-      summaryText: 'docs/archive',
     })
   })
 
-  it('uses source and destination paths for move headlines', () => {
+  it('has no summary for retired move headlines (only whatever displayName this fixture supplies)', () => {
     expect(
       getHeadlineDisplayInfo({
         request: {
@@ -753,7 +970,6 @@ describe('ToolMessage headline helpers', () => {
       }),
     ).toEqual({
       displayName: 'Move path',
-      summaryText: 'docs/old.md -> docs/new.md',
     })
   })
 
@@ -773,6 +989,54 @@ describe('ToolMessage headline helpers', () => {
     ).toEqual({
       displayName: 'Terminal command',
       summaryText: 'git status',
+    })
+  })
+
+  it('uses the shared terminal-command label for CLI command execution', () => {
+    expect(
+      getToolDisplayInfo(
+        {
+          name: 'commandExecution',
+          arguments: createCompleteToolCallArguments({
+            value: { command: '/bin/zsh -lc pwd', cwd: '/vault' },
+          }),
+          metadata: {
+            cliToolCall: {
+              runtimeId: 'codex',
+              eventType: 'commandExecution',
+              name: 'commandExecution',
+              capability: 'command_execution',
+            },
+          },
+        },
+        labels,
+      ),
+    ).toEqual({
+      displayName: 'Terminal command',
+      summaryText: '/bin/zsh -lc pwd',
+    })
+
+    expect(
+      getToolDisplayInfo(
+        {
+          name: 'Bash',
+          arguments: createCompleteToolCallArguments({
+            value: { command: 'ls -la' },
+          }),
+          metadata: {
+            cliToolCall: {
+              runtimeId: 'claude-code',
+              eventType: 'tool_use',
+              name: 'Bash',
+              capability: 'command_execution',
+            },
+          },
+        },
+        labels,
+      ),
+    ).toEqual({
+      displayName: 'Terminal command',
+      summaryText: 'ls -la',
     })
   })
 
@@ -813,8 +1077,7 @@ describe('ToolMessage headline helpers', () => {
       }),
     ).toEqual({
       displayName: 'Terminal command',
-      summaryText:
-        'Long bash command with streaming output seq, echo, date, sleep, pwd +2',
+      summaryText: 'seq, echo, date, sleep, pwd +2',
     })
   })
 
@@ -887,5 +1150,52 @@ describe('ToolMessage headline helpers', () => {
         labels,
       }).summaryText,
     ).toBe('完成第二步')
+  })
+})
+
+describe('isAlwaysAllowDisabledForRequest', () => {
+  it('follows the owning capability when the call carries no mode override', () => {
+    // `terminal` declares allowAlwaysAllow: false, `file_editing` true.
+    expect(
+      isAlwaysAllowDisabledForRequest({ name: 'yolo_local__terminal_command' }),
+    ).toBe(true)
+    expect(
+      isAlwaysAllowDisabledForRequest({ name: 'yolo_local__fs_edit' }),
+    ).toBe(false)
+  })
+
+  it("prefers the running mode's snapshot over the capability declaration", () => {
+    // Max opens always-allow on the terminal (master.md §4 Q8) ...
+    expect(
+      isAlwaysAllowDisabledForRequest({
+        name: 'yolo_local__terminal_command',
+        metadata: { allowAlwaysAllow: true },
+      }),
+    ).toBe(false)
+    // ... and the snapshot can equally close it on a capability that allows it.
+    expect(
+      isAlwaysAllowDisabledForRequest({
+        name: 'yolo_local__fs_edit',
+        metadata: { allowAlwaysAllow: false },
+      }),
+    ).toBe(true)
+  })
+
+  it('keeps a module mode per-call gate above any mode override', () => {
+    expect(
+      isAlwaysAllowDisabledForRequest({
+        name: 'module-mode-learning-chat__start_course_generation',
+        metadata: {
+          approvalPolicy: 'always-require-user',
+          allowAlwaysAllow: true,
+        },
+      }),
+    ).toBe(true)
+  })
+
+  it('leaves third-party MCP tools enabled', () => {
+    expect(isAlwaysAllowDisabledForRequest({ name: 'playwright__click' })).toBe(
+      false,
+    )
   })
 })

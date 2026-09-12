@@ -3,7 +3,7 @@ import { Assistant } from '../../types/assistant.types'
 
 import {
   buildAssistantToolPreferencesFromEnabledToolNames,
-  buildDefaultBuiltinToolPreferences,
+  buildDefaultBuiltinCapabilityPreferences,
   getAssistantToolPreferences,
 } from './tool-preferences'
 
@@ -16,17 +16,18 @@ const DEFAULT_ASSISTANT_SYSTEM_PROMPT = ''
 export const isDefaultAssistantId = (assistantId?: string | null): boolean =>
   assistantId === DEFAULT_ASSISTANT_ID
 
-export const createDefaultAssistant = (fallbackModelId: string): Assistant => ({
+export const createDefaultAssistant = (): Assistant => ({
   id: DEFAULT_ASSISTANT_ID,
   name: DEFAULT_ASSISTANT_NAME,
   description: DEFAULT_ASSISTANT_DESCRIPTION,
   systemPrompt: DEFAULT_ASSISTANT_SYSTEM_PROMPT,
-  modelId: fallbackModelId,
+  // Omit modelId so new Default agents follow the global chat model.
   persona: 'balanced',
   enableTools: true,
   includeBuiltinTools: true,
   enabledToolNames: [],
-  toolPreferences: buildDefaultBuiltinToolPreferences(),
+  toolPreferences: {},
+  builtinCapabilityPreferences: buildDefaultBuiltinCapabilityPreferences(),
   toolServerPreferences: {},
   enabledSkills: [],
   skillPreferences: {},
@@ -53,6 +54,8 @@ const hasDefaultAssistantChanged = (
       JSON.stringify(normalized.enabledToolNames ?? []) ||
     JSON.stringify(current.toolPreferences ?? {}) !==
       JSON.stringify(normalized.toolPreferences ?? {}) ||
+    JSON.stringify(current.builtinCapabilityPreferences ?? {}) !==
+      JSON.stringify(normalized.builtinCapabilityPreferences ?? {}) ||
     JSON.stringify(current.toolServerPreferences ?? {}) !==
       JSON.stringify(normalized.toolServerPreferences ?? {}) ||
     JSON.stringify(current.enabledSkills ?? []) !==
@@ -65,10 +68,7 @@ const hasDefaultAssistantChanged = (
   )
 }
 
-const normalizeDefaultAssistant = (
-  assistant: Assistant,
-  fallbackModelId: string,
-): Assistant => {
+const normalizeDefaultAssistant = (assistant: Assistant): Assistant => {
   const createdAt = assistant.createdAt ?? Date.now()
   const toolPreferences = getAssistantToolPreferences(assistant)
   const normalizedBase: Assistant = {
@@ -80,7 +80,8 @@ const normalizeDefaultAssistant = (
       typeof assistant.systemPrompt === 'string'
         ? assistant.systemPrompt
         : DEFAULT_ASSISTANT_SYSTEM_PROMPT,
-    modelId: assistant.modelId || fallbackModelId,
+    // Keep empty/undefined modelId as "follow global default"; never rewrite it.
+    modelId: assistant.modelId || undefined,
     enableTools: assistant.enableTools ?? true,
     includeBuiltinTools: assistant.includeBuiltinTools ?? true,
     enabledToolNames: assistant.enabledToolNames ?? [],
@@ -90,6 +91,7 @@ const normalizeDefaultAssistant = (
         : buildAssistantToolPreferencesFromEnabledToolNames(
             assistant.enabledToolNames,
           ),
+    builtinCapabilityPreferences: assistant.builtinCapabilityPreferences ?? {},
     toolServerPreferences: assistant.toolServerPreferences ?? {},
     enabledSkills: assistant.enabledSkills ?? [],
     skillPreferences: assistant.skillPreferences ?? {},
@@ -113,13 +115,12 @@ export const ensureDefaultAssistantInSettings = (
   settings: YoloSettings,
 ): YoloSettings => {
   const assistants = settings.assistants || []
-  const fallbackModelId = settings.chatModelId
   const existingDefault = assistants.find((assistant) =>
     isDefaultAssistantId(assistant.id),
   )
   const normalizedDefault = existingDefault
-    ? normalizeDefaultAssistant(existingDefault, fallbackModelId)
-    : createDefaultAssistant(fallbackModelId)
+    ? normalizeDefaultAssistant(existingDefault)
+    : createDefaultAssistant()
 
   const nextAssistants: Assistant[] = [
     normalizedDefault,

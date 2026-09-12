@@ -16,11 +16,11 @@ const mockCompilePlainUserMessagePrompt = jest.fn(
   }),
 )
 
-jest.mock('../../components/chat-view/chat-runtime-inputs', () => ({
+jest.mock('./chat-runtime-inputs', () => ({
   resolveWorkspaceScopeForRuntimeInput: jest.fn(() => null),
 }))
 
-jest.mock('../../components/chat-view/chat-runtime-profiles', () => ({
+jest.mock('./chat-runtime-profiles', () => ({
   resolveChatModeRuntime: jest.fn(() => ({
     loopConfig: {
       enableTools: true,
@@ -63,7 +63,6 @@ jest.mock('../../utils/chat/requestContextBuilder', () => ({
 import { TFile, TFolder } from 'obsidian'
 import type { App } from 'obsidian'
 
-import { resolveChatModeRuntime } from '../../components/chat-view/chat-runtime-profiles'
 import type { YoloSettings } from '../../settings/schema/setting.types'
 import type { ChatMessage, ChatUserMessage } from '../../types/chat'
 import {
@@ -71,16 +70,21 @@ import {
   ToolCallResponseStatus,
 } from '../../types/tool-call.types'
 import { getChatModelClient } from '../llm/manager'
+import type { InProcessToolServer } from '../mcp/inProcessToolServer'
 import type { McpManager } from '../mcp/mcpManager'
 
 import {
+  AgentRunApi,
   buildAgentApiPrompt,
   conversationStateToEvents,
+  mergeInProcessServerToolNames,
   narrowAllowedToolNames,
   resolveAgentApiRunInput,
 } from './agent-api'
 import type { YoloAgentRunRequest } from './agent-api'
-import type { AgentConversationState, AgentService } from './service'
+import { AGENT_CAPABILITY_TOOL_NAMES } from './capability-profile'
+import { resolveChatModeRuntime } from './chat-runtime-profiles'
+import type { AgentConversationState, AgentSessionService } from './service'
 
 describe('agent api helpers', () => {
   beforeEach(() => {
@@ -151,9 +155,7 @@ describe('agent api helpers', () => {
         },
       ],
       providers: [{ id: 'mock-provider', apiType: 'openai' }],
-      mcp: {
-        enableToolDisclosure: false,
-      },
+      mcp: {},
       continuationOptions: {
         primaryRequestTimeoutMs: 30000,
         streamFallbackRecoveryEnabled: true,
@@ -302,6 +304,52 @@ describe('agent api helpers', () => {
     ).rejects.toThrow('Either prompt or messages must be provided')
   })
 
+  it('expands a capability tier into the host tool grant and bashReadOnly', async () => {
+    jest.mocked(resolveChatModeRuntime).mockReturnValueOnce({
+      loopConfig: {
+        enableTools: true,
+        includeBuiltinTools: true,
+        maxAutoIterations: 100,
+      },
+      allowedToolNames: [
+        AGENT_CAPABILITY_TOOL_NAMES.bash,
+        AGENT_CAPABILITY_TOOL_NAMES.edit,
+        'server__search',
+      ],
+      toolPreferences: undefined,
+      bypassToolApproval: false,
+    } as unknown as ReturnType<typeof resolveChatModeRuntime>)
+
+    const result = await resolveAgentApiRunInput(
+      buildResolveAgentApiRunInputArgs({
+        prompt: 'Read a few notes',
+        capability: 'vault-read',
+      }),
+    )
+
+    // 'vault-read' grants the bash identity only, and carries the read-only
+    // constraint separately — the same expansion the module path used to do
+    // for itself before the tier moved down here.
+    expect(result.input.allowedToolNames).toEqual([
+      AGENT_CAPABILITY_TOOL_NAMES.bash,
+    ])
+    expect(result.input.bashReadOnly).toBe(true)
+  })
+
+  it('lets an explicit tool list and bashReadOnly win over the capability tier', async () => {
+    const result = await resolveAgentApiRunInput(
+      buildResolveAgentApiRunInputArgs({
+        prompt: 'Read a few notes',
+        capability: 'vault-read',
+        tools: { allowedToolNames: ['server__search'] },
+        bashReadOnly: false,
+      }),
+    )
+
+    expect(result.input.allowedToolNames).toEqual(['server__search'])
+    expect(result.input.bashReadOnly).toBe(false)
+  })
+
   it('only narrows runtime allowed tools', () => {
     expect(
       narrowAllowedToolNames(
@@ -310,8 +358,38 @@ describe('agent api helpers', () => {
       ),
     ).toEqual(['server__search'])
 
+    expect(narrowAllowedToolNames(undefined, ['server__search'])).toEqual([])
+  })
+
+  it('unions an in-process server tool names into allowedToolNames instead of narrowing them', () => {
+    const server: InProcessToolServer = {
+      listTools: () => [
+        {
+          name: 'emit_card',
+          description: 'x',
+          inputSchema: { type: 'object' },
+        },
+      ],
+      callTool: jest.fn(),
+    }
+
     expect(
-      narrowAllowedToolNames(undefined, ['server__search']),
+      mergeInProcessServerToolNames(['server__search'], {
+        name: 'module-learning-abc',
+        server,
+      }),
+    ).toEqual(['server__search', 'module-learning-abc__emit_card'])
+
+    // No in-process server: passes the input through unchanged, undefined included.
+    expect(mergeInProcessServerToolNames(undefined, undefined)).toBeUndefined()
+    expect(mergeInProcessServerToolNames(['a'], undefined)).toEqual(['a'])
+
+    // A server with no tools doesn't force an empty array into being.
+    expect(
+      mergeInProcessServerToolNames(undefined, {
+        name: 'module-learning-abc',
+        server: { listTools: () => [], callTool: jest.fn() },
+      }),
     ).toBeUndefined()
   })
 
@@ -343,9 +421,7 @@ describe('agent api helpers', () => {
           },
         ],
         providers: [{ id: 'mock-provider', apiType: 'openai' }],
-        mcp: {
-          enableToolDisclosure: false,
-        },
+        mcp: {},
         continuationOptions: {
           primaryRequestTimeoutMs: 30000,
           streamFallbackRecoveryEnabled: true,
@@ -490,6 +566,214 @@ describe('agent api helpers', () => {
   })
 })
 
+describe('AgentRunApi in-process tool server lifecycle', () => {
+  const buildService = ({
+    mcpManager,
+    agentServiceOverrides,
+  }: {
+    mcpManager: McpManager
+    agentServiceOverrides: Partial<AgentSessionService>
+  }) => {
+    const settings = {
+      currentAssistantId: 'assistant-1',
+      chatModelId: 'mock-model',
+      assistants: [
+        {
+          id: 'assistant-1',
+          modelId: 'mock-model',
+          toolPreferences: {},
+          enabledToolNames: [],
+          includeBuiltinTools: true,
+          skillPreferences: {},
+        },
+      ],
+      providers: [{ id: 'mock-provider', apiType: 'openai' }],
+      continuationOptions: {
+        primaryRequestTimeoutMs: 30000,
+        streamFallbackRecoveryEnabled: true,
+      },
+      skills: {},
+    } as unknown as YoloSettings
+    const agentService = {
+      getSystemPromptSnapshotStore: jest.fn(() => null),
+      getPromptSourceWatcher: jest.fn(() => ({
+        getRevision: jest.fn(() => 1),
+        setWatchedPaths: jest.fn(),
+      })),
+      abortConversation: jest.fn(() => false),
+      ...agentServiceOverrides,
+    } as unknown as AgentSessionService
+
+    return new AgentRunApi({
+      app: { vault: {} } as unknown as App,
+      getSettings: () => settings,
+      getAgentService: () => agentService,
+      getMcpManager: async () => mcpManager,
+    })
+  }
+
+  const collect = async <T>(iterable: AsyncIterable<T>): Promise<T[]> => {
+    const out: T[] = []
+    for await (const value of iterable) out.push(value)
+    return out
+  }
+
+  const emitCardServer: InProcessToolServer = {
+    listTools: () => [
+      { name: 'emit_card', description: 'x', inputSchema: { type: 'object' } },
+    ],
+    callTool: async () => ({
+      status: ToolCallResponseStatus.Success,
+      data: { type: 'text', text: 'ok' },
+    }),
+  }
+
+  it('registers the in-process server before the run starts and disposes it once the run completes', async () => {
+    const dispose = jest.fn()
+    const registerInProcessServer = jest.fn(() => dispose)
+    const mcpManager = { registerInProcessServer } as unknown as McpManager
+    let capturedInput: { allowedToolNames?: string[] } | undefined
+
+    const agentService = buildService({
+      mcpManager,
+      agentServiceOverrides: {
+        subscribe: jest.fn((conversationId, callback) => {
+          callback({
+            conversationId,
+            status: 'completed',
+            messages: [],
+          } as unknown as AgentConversationState)
+          return () => undefined
+        }),
+        run: jest.fn(async (input) => {
+          capturedInput = input.input as { allowedToolNames?: string[] }
+          return { conversationId: input.conversationId }
+        }) as unknown as AgentSessionService['run'],
+      },
+    })
+
+    const events = await collect(
+      agentService.stream({
+        prompt: 'hi',
+        tools: {
+          inProcessServer: {
+            name: 'module-learning-abc',
+            server: emitCardServer,
+          },
+        },
+      }),
+    )
+
+    expect(registerInProcessServer).toHaveBeenCalledWith(
+      'module-learning-abc',
+      emitCardServer,
+    )
+    expect(dispose).toHaveBeenCalledTimes(1)
+    expect(capturedInput?.allowedToolNames).toContain(
+      'module-learning-abc__emit_card',
+    )
+    expect(events.some((event) => event.type === 'completed')).toBe(true)
+  })
+
+  it('still disposes the in-process server when resolving the run input throws before the loop starts', async () => {
+    const dispose = jest.fn()
+    const registerInProcessServer = jest.fn(() => dispose)
+    const mcpManager = { registerInProcessServer } as unknown as McpManager
+
+    const agentService = buildService({
+      mcpManager,
+      agentServiceOverrides: {
+        subscribe: jest.fn(() => () => undefined),
+        run: jest.fn(),
+      },
+    })
+
+    // Neither `prompt` nor `messages` is set: resolveAgentApiRunInput throws
+    // synchronously, well after registration but before the run loop starts.
+    const events = await collect(
+      agentService.stream({
+        tools: {
+          inProcessServer: {
+            name: 'module-learning-abc',
+            server: emitCardServer,
+          },
+        },
+      }),
+    )
+
+    expect(registerInProcessServer).toHaveBeenCalledTimes(1)
+    expect(dispose).toHaveBeenCalledTimes(1)
+    expect(events).toEqual([expect.objectContaining({ type: 'error' })])
+  })
+
+  it('disposes the in-process server on an aborted run', async () => {
+    const dispose = jest.fn()
+    const registerInProcessServer = jest.fn(() => dispose)
+    const mcpManager = { registerInProcessServer } as unknown as McpManager
+    const abortController = new AbortController()
+
+    const agentService = buildService({
+      mcpManager,
+      agentServiceOverrides: {
+        subscribe: jest.fn((conversationId, callback) => {
+          callback({
+            conversationId,
+            status: 'aborted',
+            messages: [],
+          } as unknown as AgentConversationState)
+          return () => undefined
+        }),
+        run: jest.fn(
+          async () => undefined,
+        ) as unknown as AgentSessionService['run'],
+        abortConversation: jest.fn(() => true),
+      },
+    })
+
+    const events = await collect(
+      agentService.stream({
+        prompt: 'hi',
+        tools: {
+          inProcessServer: {
+            name: 'module-learning-abc',
+            server: emitCardServer,
+          },
+        },
+        abortSignal: abortController.signal,
+      }),
+    )
+
+    expect(dispose).toHaveBeenCalledTimes(1)
+    expect(events.some((event) => event.type === 'state')).toBe(true)
+  })
+
+  it('does not touch the McpManager registry when no in-process server is requested', async () => {
+    const registerInProcessServer = jest.fn()
+    const mcpManager = { registerInProcessServer } as unknown as McpManager
+
+    const agentService = buildService({
+      mcpManager,
+      agentServiceOverrides: {
+        subscribe: jest.fn((conversationId, callback) => {
+          callback({
+            conversationId,
+            status: 'completed',
+            messages: [],
+          } as unknown as AgentConversationState)
+          return () => undefined
+        }),
+        run: jest.fn(
+          async () => undefined,
+        ) as unknown as AgentSessionService['run'],
+      },
+    })
+
+    await collect(agentService.stream({ prompt: 'hi' }))
+
+    expect(registerInProcessServer).not.toHaveBeenCalled()
+  })
+})
+
 function buildResolveAgentApiRunInputArgs(request: YoloAgentRunRequest) {
   const settings = {
     currentAssistantId: 'assistant-1',
@@ -505,9 +789,7 @@ function buildResolveAgentApiRunInputArgs(request: YoloAgentRunRequest) {
       },
     ],
     providers: [{ id: 'mock-provider', apiType: 'openai' }],
-    mcp: {
-      enableToolDisclosure: false,
-    },
+    mcp: {},
     continuationOptions: {
       primaryRequestTimeoutMs: 30000,
       streamFallbackRecoveryEnabled: true,
@@ -520,7 +802,7 @@ function buildResolveAgentApiRunInputArgs(request: YoloAgentRunRequest) {
       getRevision: jest.fn(() => 1),
       setWatchedPaths: jest.fn(),
     })),
-  } as unknown as AgentService
+  } as unknown as AgentSessionService
 
   return {
     request,

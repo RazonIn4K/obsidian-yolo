@@ -8,20 +8,29 @@ import {
   Settings,
   Wrench,
 } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react'
 
 import { useApp } from '../../contexts/app-context'
 import { useLanguage } from '../../contexts/language-context'
 import { usePlugin } from '../../contexts/plugin-context'
 import { useSettings } from '../../contexts/settings-context'
+import { getAssistantModelDisplayLabel } from '../../core/agent/assistant-model'
 import {
   DEFAULT_ASSISTANT_ID,
   isDefaultAssistantId,
 } from '../../core/agent/default-assistant'
 import { countEnabledVisibleAssistantTools } from '../../core/agent/tool-display-count'
+import { toModuleToolSetEnablement } from '../../core/modules/moduleToolSetRegistry'
 import { Assistant } from '../../types/assistant.types'
 import type { McpTool } from '../../types/mcp.types'
 import { renderAssistantIcon } from '../../utils/assistant-icon'
+import { openPluginSettingsTab } from '../../utils/openPluginSettingsTab'
 import { YoloPopoverContent } from '../common/popover'
 import { AssistantsModal } from '../settings/modals/AssistantsModal'
 
@@ -46,6 +55,21 @@ export function AssistantSelector({
   const [availableTools, setAvailableTools] = useState<McpTool[]>([])
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const isControlled = typeof currentAssistantId === 'string'
+
+  // Module tool sets (docs/plans/09-03-whiteboard-agent-tools/master.md
+  // D1b): same registry `useSyncExternalStore` pattern as `Chat.tsx`'s
+  // module chat mode subscription, reduced to what
+  // `countEnabledVisibleAssistantTools` needs so this selector's per-agent
+  // tool count matches what the agent editor and chat runtime resolve.
+  const moduleToolSetRegistry = plugin.getModuleToolSetRegistry()
+  const moduleToolSetSnapshot = useSyncExternalStore(
+    moduleToolSetRegistry.subscribe,
+    moduleToolSetRegistry.getSnapshot,
+  )
+  const moduleToolSetEnablement = useMemo(
+    () => toModuleToolSetEnablement(moduleToolSetSnapshot),
+    [moduleToolSetSnapshot],
+  )
 
   useEffect(() => {
     let mounted = true
@@ -153,13 +177,7 @@ export function AssistantSelector({
 
   const handleManageAll = () => {
     setOpen(false)
-    // Pre-select the Agent tab; SettingsTabs reads this on mount.
-    // Key kept in sync with SettingsTabs.STORAGE_KEY.
-    app.saveLocalStorage('yolo_settings_active_tab', 'agent')
-    // @ts-expect-error: setting property exists in Obsidian's App but is not typed
-    app.setting.open()
-    // @ts-expect-error: setting property exists in Obsidian's App but is not typed
-    app.setting.openTabById(plugin.manifest.id)
+    openPluginSettingsTab(app, plugin, 'agent')
   }
 
   const defaultAssistant = assistants.find((assistant) =>
@@ -168,15 +186,26 @@ export function AssistantSelector({
   const customAssistants = assistants.filter(
     (assistant) => !isDefaultAssistantId(assistant.id),
   )
-  const fallbackModelId = settings.chatModelId
 
   const renderMetaRow = (assistant: Assistant) => {
-    const rawModelId = assistant.modelId || fallbackModelId || ''
-    const modelLabel = rawModelId.includes('/')
-      ? rawModelId.slice(rawModelId.lastIndexOf('/') + 1)
-      : rawModelId
+    const followDefaultLabel = t(
+      'settings.agent.followDefaultModel',
+      'Follow default model',
+    )
+    const rawModelId = getAssistantModelDisplayLabel(
+      assistant.modelId,
+      followDefaultLabel,
+    )
+    const modelLabel =
+      rawModelId === followDefaultLabel || !rawModelId.includes('/')
+        ? rawModelId
+        : rawModelId.slice(rawModelId.lastIndexOf('/') + 1)
     const toolCount = assistant.enableTools
-      ? countEnabledVisibleAssistantTools(assistant, availableTools)
+      ? countEnabledVisibleAssistantTools(
+          assistant,
+          availableTools,
+          moduleToolSetEnablement,
+        )
       : 0
     return (
       <div className="yolo-assistant-selector-item-meta">

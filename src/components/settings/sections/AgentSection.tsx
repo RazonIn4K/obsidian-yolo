@@ -1,28 +1,22 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { BookOpen, Copy, Cpu, Plus, Trash2, Wrench } from 'lucide-react'
-import { App } from 'obsidian'
-import { useEffect, useMemo, useState } from 'react'
+import { App, Platform } from 'obsidian'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from 'react'
 
 import { useLanguage } from '../../../contexts/language-context'
 import { usePlugin } from '../../../contexts/plugin-context'
 import { useSettings } from '../../../contexts/settings-context'
-import {
-  FILE_EDIT_GROUP_TOOL_NAME,
-  FILE_OPS_GROUP_TOOL_NAME,
-  MEMORY_OPS_GROUP_TOOL_NAME,
-  WEB_OPS_GROUP_TOOL_NAME,
-  WEB_OPS_SPLIT_ACTION_TOOL_NAMES,
-  getBuiltinToolUiMeta,
-} from '../../../core/agent/builtinToolUiMeta'
+import { getAssistantModelDisplayLabel } from '../../../core/agent/assistant-model'
 import { isDefaultAssistantId } from '../../../core/agent/default-assistant'
 import { getEnabledAssistantToolNames } from '../../../core/agent/tool-preferences'
-import {
-  LOCAL_FS_EDIT_TOOL_NAMES,
-  LOCAL_FS_PATH_OPERATION_TOOL_NAMES,
-  LOCAL_MEMORY_SPLIT_ACTION_TOOL_NAMES,
-  getLocalFileTools,
-} from '../../../core/mcp/localFileTools'
 import { McpManager } from '../../../core/mcp/mcpManager'
+import { toModuleToolSetEnablement } from '../../../core/modules/moduleToolSetRegistry'
 import { humanizeSkillName } from '../../../core/skills/liteSkills'
 import { isSkillEnabledForAssistant } from '../../../core/skills/skillPolicy'
 import { useLiteSkillEntries } from '../../../hooks/useLiteSkillEntries'
@@ -30,39 +24,43 @@ import { Assistant } from '../../../types/assistant.types'
 import { McpServerState, McpServerStatus } from '../../../types/mcp.types'
 import { renderAssistantIcon } from '../../../utils/assistant-icon'
 import { ObsidianButton } from '../../common/ObsidianButton'
-import { ObsidianSetting } from '../../common/ObsidianSetting'
-import { ObsidianToggle } from '../../common/ObsidianToggle'
 import { ConfirmModal } from '../../modals/ConfirmModal'
 import { AgentSkillsModal } from '../modals/AgentSkillsModal'
 import { AgentToolsModal } from '../modals/AgentToolsModal'
 import { AssistantsModal } from '../modals/AssistantsModal'
 
 import { AgentAutoContextCompactionSection } from './AgentAutoContextCompactionSection'
+import { AgentCliPathSection } from './AgentCliPathSection'
 import { AgentImageReadingSection } from './AgentImageReadingSection'
 import { AgentMcpServerSection } from './AgentMcpServerSection'
+import { buildBuiltinCapabilityRows } from './builtinCapabilityRows'
 import { NotificationSettingsSection } from './NotificationSettingsSection'
 
 type AgentSectionProps = {
   app: App
 }
 
-const EDIT_FS_TOOL_NAME_SET = new Set<string>(LOCAL_FS_EDIT_TOOL_NAMES)
-const PATH_FS_TOOL_NAME_SET = new Set<string>(
-  LOCAL_FS_PATH_OPERATION_TOOL_NAMES,
-)
-const SPLIT_MEMORY_TOOL_NAME_SET = new Set<string>(
-  LOCAL_MEMORY_SPLIT_ACTION_TOOL_NAMES,
-)
-const SPLIT_WEB_TOOL_NAME_SET = new Set<string>(WEB_OPS_SPLIT_ACTION_TOOL_NAMES)
-
 export function AgentSection({ app }: AgentSectionProps) {
   const { settings, setSettings } = useSettings()
   const { t } = useLanguage()
   const plugin = usePlugin()
   const assistants = settings.assistants || []
+  const moduleToolSetRegistry = plugin.getModuleToolSetRegistry()
+  const moduleToolSetSnapshot = useSyncExternalStore(
+    moduleToolSetRegistry.subscribe,
+    moduleToolSetRegistry.getSnapshot,
+  )
+  const moduleToolSetEnablement = useMemo(
+    () => toModuleToolSetEnablement(moduleToolSetSnapshot),
+    [moduleToolSetSnapshot],
+  )
   const [mcpManager, setMcpManager] = useState<McpManager | null>(null)
   const [mcpServers, setMcpServers] = useState<McpServerState[]>([])
   const [mcpManagerLoading, setMcpManagerLoading] = useState(true)
+  const [portalContainer, setPortalContainer] = useState<HTMLElement>()
+  const sectionRef = useCallback((node: HTMLDivElement | null) => {
+    setPortalContainer(node?.ownerDocument.body)
+  }, [])
 
   useEffect(() => {
     let isMounted = true
@@ -187,16 +185,6 @@ export function AgentSection({ app }: AgentSectionProps) {
     modal.open()
   }
 
-  const handleToggleToolDisclosure = async (value: boolean) => {
-    await setSettings({
-      ...settings,
-      mcp: {
-        ...settings.mcp,
-        enableToolDisclosure: value,
-      },
-    })
-  }
-
   const mcpTools = useMemo(
     () =>
       mcpServers
@@ -217,99 +205,14 @@ export function AgentSection({ app }: AgentSectionProps) {
   )
 
   const builtinTools = useMemo(() => {
-    const toolOptions = settings.mcp.builtinToolOptions
-    const tools = getLocalFileTools()
-      .filter(
-        (tool) =>
-          !EDIT_FS_TOOL_NAME_SET.has(tool.name) &&
-          !PATH_FS_TOOL_NAME_SET.has(tool.name) &&
-          !SPLIT_MEMORY_TOOL_NAME_SET.has(tool.name) &&
-          !SPLIT_WEB_TOOL_NAME_SET.has(tool.name),
-      )
-      .map((tool) => {
-        const meta = getBuiltinToolUiMeta(tool.name)
-        return {
-          id: tool.name,
-          label: meta ? t(meta.labelKey, meta.labelFallback) : tool.name,
-          enabled: !(toolOptions[tool.name]?.disabled ?? false),
-        }
-      })
-
-    const editSplitToolEnabled = LOCAL_FS_EDIT_TOOL_NAMES.every(
-      (toolName) =>
-        !(toolOptions[toolName]?.disabled ?? false) &&
-        !(toolOptions[FILE_EDIT_GROUP_TOOL_NAME]?.disabled ?? false),
-    )
-    const fileEditMeta = getBuiltinToolUiMeta(FILE_EDIT_GROUP_TOOL_NAME)
-    if (!fileEditMeta) {
-      throw new Error('Missing built-in tool UI metadata for fs_edit_ops')
-    }
-    const fileEditTool = {
-      id: FILE_EDIT_GROUP_TOOL_NAME,
-      label: t(fileEditMeta.labelKey, fileEditMeta.labelFallback),
-      enabled: editSplitToolEnabled,
-    }
-
-    const splitToolEnabled = LOCAL_FS_PATH_OPERATION_TOOL_NAMES.every(
-      (toolName) =>
-        !(toolOptions[toolName]?.disabled ?? false) &&
-        !(toolOptions[FILE_OPS_GROUP_TOOL_NAME]?.disabled ?? false),
-    )
-    const fileOpsMeta = getBuiltinToolUiMeta(FILE_OPS_GROUP_TOOL_NAME)
-    if (!fileOpsMeta) {
-      throw new Error('Missing built-in tool UI metadata for fs_file_ops')
-    }
-    const fileOpsTool = {
-      id: FILE_OPS_GROUP_TOOL_NAME,
-      label: t(fileOpsMeta.labelKey, fileOpsMeta.labelFallback),
-      enabled: splitToolEnabled,
-    }
-
-    const memorySplitToolEnabled = LOCAL_MEMORY_SPLIT_ACTION_TOOL_NAMES.every(
-      (toolName) =>
-        !(toolOptions[toolName]?.disabled ?? false) &&
-        !(toolOptions[MEMORY_OPS_GROUP_TOOL_NAME]?.disabled ?? false),
-    )
-    const memoryOpsMeta = getBuiltinToolUiMeta(MEMORY_OPS_GROUP_TOOL_NAME)
-    if (!memoryOpsMeta) {
-      throw new Error('Missing built-in tool UI metadata for memory_ops')
-    }
-    const memoryOpsTool = {
-      id: MEMORY_OPS_GROUP_TOOL_NAME,
-      label: t(memoryOpsMeta.labelKey, memoryOpsMeta.labelFallback),
-      enabled: memorySplitToolEnabled,
-    }
-
-    const webSplitToolEnabled = WEB_OPS_SPLIT_ACTION_TOOL_NAMES.every(
-      (toolName) =>
-        !(toolOptions[toolName]?.disabled ?? false) &&
-        !(toolOptions[WEB_OPS_GROUP_TOOL_NAME]?.disabled ?? false),
-    )
-    const webOpsMeta = getBuiltinToolUiMeta(WEB_OPS_GROUP_TOOL_NAME)
-    if (!webOpsMeta) {
-      throw new Error('Missing built-in tool UI metadata for web_ops')
-    }
-    const webOpsTool = {
-      id: WEB_OPS_GROUP_TOOL_NAME,
-      label: t(webOpsMeta.labelKey, webOpsMeta.labelFallback),
-      enabled: webSplitToolEnabled,
-    }
-
-    const fsReadIndex = tools.findIndex((tool) => tool.id === 'fs_read')
-    if (fsReadIndex >= 0) {
-      tools.splice(fsReadIndex, 0, fileEditTool)
-      tools.splice(fsReadIndex + 1, 0, fileOpsTool)
-      tools.splice(fsReadIndex + 2, 0, memoryOpsTool)
-      tools.splice(fsReadIndex + 3, 0, webOpsTool)
-    } else {
-      tools.push(fileEditTool)
-      tools.push(fileOpsTool)
-      tools.push(memoryOpsTool)
-      tools.push(webOpsTool)
-    }
-
-    return tools
-  }, [settings.mcp.builtinToolOptions, t])
+    // Lists every registered capability unconditionally, for the same reason
+    // as `AgentToolsModal.tsx`'s `builtinToolGroups` — see that useMemo. This
+    // flat overview and the modal it launches must stay in visible sync.
+    return buildBuiltinCapabilityRows({
+      toolOptions: settings.mcp.builtinCapabilityOptions,
+      t,
+    }).map((row) => ({ id: row.id, label: row.label, enabled: row.enabled }))
+  }, [settings.mcp.builtinCapabilityOptions, t])
 
   const allSkillEntries = useLiteSkillEntries(app, { settings })
   const disabledSkillIds = settings.skills?.disabledSkillIds ?? []
@@ -390,7 +293,7 @@ export function AgentSection({ app }: AgentSectionProps) {
     globallyEnabledSkillEntries.length - visibleSkillEntries.length
 
   return (
-    <div className="yolo-settings-section yolo-agent-section">
+    <div ref={sectionRef} className="yolo-settings-section yolo-agent-section">
       <div className="yolo-settings-header">
         {t('settings.agent.title', 'Agent')}
       </div>
@@ -493,22 +396,6 @@ export function AgentSection({ app }: AgentSectionProps) {
             </div>
           </article>
         </div>
-
-        <ObsidianSetting
-          name={t(
-            'settings.agent.enableToolDisclosure',
-            'On-demand tool disclosure',
-          )}
-          desc={t(
-            'settings.agent.enableToolDisclosureDesc',
-            'Beta: expose large tool schemas only when the model asks for them.',
-          )}
-        >
-          <ObsidianToggle
-            value={settings.mcp.enableToolDisclosure}
-            onChange={(value) => void handleToggleToolDisclosure(value)}
-          />
-        </ObsidianSetting>
       </section>
 
       <section className="yolo-agent-block">
@@ -575,7 +462,7 @@ export function AgentSection({ app }: AgentSectionProps) {
                       ...
                     </span>
                   </DropdownMenu.Trigger>
-                  <DropdownMenu.Portal>
+                  <DropdownMenu.Portal container={portalContainer}>
                     <DropdownMenu.Content
                       className="yolo-agent-card-menu-popover"
                       align="end"
@@ -618,12 +505,23 @@ export function AgentSection({ app }: AgentSectionProps) {
               <div className="yolo-agent-meta-row">
                 <span className="yolo-agent-meta-item">
                   <Cpu size={12} />
-                  {assistant.modelId || settings.chatModelId}
+                  {getAssistantModelDisplayLabel(
+                    assistant.modelId,
+                    t(
+                      'settings.agent.followDefaultModel',
+                      'Follow default model',
+                    ),
+                  )}
                 </span>
                 <span className="yolo-agent-meta-item">
                   <Wrench size={12} />
                   {assistant.enableTools
-                    ? `${getEnabledAssistantToolNames(assistant).length} tools`
+                    ? `${
+                        getEnabledAssistantToolNames(
+                          assistant,
+                          moduleToolSetEnablement,
+                        ).length
+                      } tools`
                     : '0 tools'}
                 </span>
                 <span className="yolo-agent-meta-item">
@@ -687,6 +585,14 @@ export function AgentSection({ app }: AgentSectionProps) {
           </div>
           <AgentMcpServerSection />
         </div>
+        {Platform.isDesktop && (
+          <div className="yolo-agent-sub-card">
+            <div className="yolo-agent-sub-card-head">
+              {t('settings.agent.cliRuntimesBlockTitle', 'CLI runtimes')}
+            </div>
+            <AgentCliPathSection app={app} />
+          </div>
+        )}
       </section>
 
       <section className="yolo-agent-block">
